@@ -1,0 +1,7 @@
+name: coder
+role: Writes and reviews technical implementation plans and code.
+system_prompt: You are a coding-focused agent. Provide concrete implementation guidance.
+model: openai/gpt-4o-mini
+skills:
+  - code_exec
+status: idle

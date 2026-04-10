@@ -1,0 +1,7 @@
+{
+  "default_model": "openai/gpt-4o-mini",
+  "dispatcher_model": "openai/gpt-4o-mini",
+  "openrouter_api_key_set": false,
+  "http_referer": "http://localhost:3000",
+  "app_title": "NemoClaw Control"
+}
