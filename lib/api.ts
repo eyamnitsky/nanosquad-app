@@ -52,6 +52,7 @@ export interface LogEntry {
   id: string
   timestamp: string
   agent: string
+  squad?: string
   model: string
   skill?: string
   task: string
@@ -76,6 +77,7 @@ export interface Project {
   run_count: number
   artifact_count: number
   notes?: string
+  squad_id?: string
 }
 
 export type RecurringTaskUnit = 'minutes' | 'hours' | 'days'
@@ -386,7 +388,7 @@ export const deleteSquad = (id: string) =>
 
 export const getProjects = () => request<Project[]>('/projects')
 export const getProject = (id: string) => request<Project>(`/projects/${encodeURIComponent(id)}`)
-export const createProject = (data: Pick<Project, 'name' | 'description' | 'notes'>) =>
+export const createProject = (data: Pick<Project, 'name' | 'description' | 'notes' | 'squad_id'>) =>
   request<Project>('/projects', { method: 'POST', body: JSON.stringify(data) })
 export const putProject = (id: string, data: Partial<Project>) =>
   request<Project>(`/projects/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) })

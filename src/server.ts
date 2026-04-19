@@ -106,6 +106,7 @@ interface Project {
   name: string
   description: string
   notes?: string
+  squad_id?: string
   created_at: string
   updated_at: string
   run_count: number
@@ -926,6 +927,29 @@ async function deleteSquad(id: string): Promise<void> {
   }
 }
 
+function deriveProjectSquadId(explicitSquadId: string | undefined, runs: Run[], projectId: string): string | undefined {
+  const direct = explicitSquadId?.trim()
+  if (direct) return direct
+
+  const counts = new Map<string, number>()
+  for (const run of runs) {
+    if (run.project_id !== projectId) continue
+    const squadId = run.squad?.trim()
+    if (!squadId) continue
+    counts.set(squadId, (counts.get(squadId) ?? 0) + 1)
+  }
+
+  let best: string | undefined
+  let bestCount = 0
+  for (const [squadId, count] of counts.entries()) {
+    if (count > bestCount) {
+      best = squadId
+      bestCount = count
+    }
+  }
+  return best
+}
+
 async function listProjects(): Promise<Project[]> {
   const entries = await fs.readdir(PATHS.projects, { withFileTypes: true })
   const dirs = entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
@@ -944,6 +968,7 @@ async function listProjects(): Promise<Project[]> {
         name: base.name,
         description: base.description ?? '',
         notes: base.notes,
+        squad_id: deriveProjectSquadId(base.squad_id, runs, base.id),
         created_at: base.created_at ?? nowIso(),
         updated_at: base.updated_at ?? base.created_at ?? nowIso(),
         run_count,
@@ -968,6 +993,7 @@ async function getProject(id: string): Promise<Project | null> {
     name: base.name,
     description: base.description ?? '',
     notes: base.notes,
+    squad_id: deriveProjectSquadId(base.squad_id, runs, base.id),
     created_at: base.created_at ?? nowIso(),
     updated_at: base.updated_at ?? base.created_at ?? nowIso(),
     run_count: runs.filter(run => run.project_id === base.id).length,
@@ -988,6 +1014,10 @@ async function putProject(id: string, payload: Partial<Project>): Promise<Projec
     name: nextName,
     description: payload.description ?? existing?.description ?? '',
     notes: payload.notes ?? existing?.notes,
+    squad_id:
+      payload.squad_id !== undefined
+        ? String(payload.squad_id ?? '').trim() || undefined
+        : existing?.squad_id,
     created_at: createdAt,
     updated_at: nowIso(),
     run_count: existing?.run_count ?? 0,
@@ -3613,18 +3643,28 @@ async function bootstrap(): Promise<void> {
   app.post('/projects', async (req, res) => {
     const body = req.body as Partial<Project>
     if (!body.name?.trim()) return res.status(400).send('name is required')
+    const squadId = typeof body.squad_id === 'string' ? body.squad_id.trim() : ''
+    if (!squadId) return res.status(400).send('squad_id is required')
+    if (!(await getSquad(squadId))) return res.status(400).send('Invalid squad_id')
     const id = body.id?.trim() || `proj-${Date.now()}-${randomUUID().slice(0, 6)}`
     const project = await putProject(id, {
       id,
       name: body.name.trim(),
       description: body.description ?? '',
       notes: body.notes ?? '',
+      squad_id: squadId,
     })
     res.json(project)
   })
 
   app.put('/projects/:id', async (req, res) => {
     try {
+      const body = req.body as Partial<Project>
+      if (typeof body.squad_id === 'string' && body.squad_id.trim()) {
+        if (!(await getSquad(body.squad_id.trim()))) {
+          return res.status(400).send('Invalid squad_id')
+        }
+      }
       const project = await putProject(req.params.id, req.body as Partial<Project>)
       res.json(project)
     } catch (error) {
@@ -3739,6 +3779,7 @@ async function bootstrap(): Promise<void> {
 
   app.get('/logs', async (req, res) => {
     const entries = await readAuditEntries()
+    const runSquadById = new Map((await listRunsRaw()).map(run => [run.id, run.squad]))
     const agent = typeof req.query.agent === 'string' ? req.query.agent.toLowerCase() : ''
     const skill = typeof req.query.skill === 'string' ? req.query.skill.toLowerCase() : ''
     const from = typeof req.query.from === 'string' ? new Date(req.query.from).getTime() : NaN
@@ -3758,6 +3799,7 @@ async function bootstrap(): Promise<void> {
         id: entry.id,
         timestamp: entry.timestamp,
         agent: entry.agent,
+        squad: entry.squad ?? runSquadById.get(entry.run_id),
         model: entry.model_used,
         skill: entry.skill,
         task: entry.task,

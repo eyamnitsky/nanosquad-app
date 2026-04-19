@@ -5,7 +5,7 @@ import { Download, ChevronDown, ChevronUp, ScrollText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { getLogs, getLogsDownloadUrl, type LogEntry } from '@/lib/api'
+import { getLogs, getLogsDownloadUrl, getSquads, type LogEntry, type Squad } from '@/lib/api'
 import { LogEntrySkeleton } from '@/components/skeletons'
 
 function LogRow({ entry }: { entry: LogEntry }) {
@@ -45,6 +45,7 @@ function LogRow({ entry }: { entry: LogEntry }) {
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[] | null>(null)
+  const [squads, setSquads] = useState<Squad[]>([])
   const [agentFilter, setAgentFilter] = useState('')
   const [skillFilter, setSkillFilter] = useState('')
   const [fromFilter, setFromFilter] = useState('')
@@ -54,6 +55,7 @@ export default function LogsPage() {
     getLogs()
       .then(setLogs)
       .catch(() => setLogs([]))
+    getSquads().then(setSquads).catch(() => setSquads([]))
   }, [])
 
   const filtered = useMemo(() => {
@@ -66,6 +68,27 @@ export default function LogsPage() {
       return true
     })
   }, [logs, agentFilter, skillFilter, fromFilter, toFilter])
+
+  const sections = useMemo(() => {
+    const byKey = new Map<string, { key: string; label: string; color: string; items: LogEntry[] }>()
+    for (const entry of filtered) {
+      const squadId = entry.squad
+      const squad = squadId ? squads.find(item => item.id === squadId) : undefined
+      const key = squad?.id ?? 'unassigned'
+      const section = byKey.get(key)
+      if (section) {
+        section.items.push(entry)
+        continue
+      }
+      byKey.set(key, {
+        key,
+        label: squad?.name ?? (squadId ? squadId : 'No squad'),
+        color: squad?.color ?? '#6b7280',
+        items: [entry],
+      })
+    }
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label))
+  }, [filtered, squads])
 
   const handleDownload = () => {
     const url = getLogsDownloadUrl()
@@ -137,7 +160,7 @@ export default function LogsPage() {
         <div className="rounded-lg border border-border overflow-hidden">
           {Array.from({ length: 5 }).map((_, i) => <LogEntrySkeleton key={i} />)}
         </div>
-      ) : filtered.length === 0 ? (
+      ) : sections.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-24 text-center">
           <ScrollText className="h-10 w-10 text-muted-foreground/40 mb-4" />
           <h2 className="text-base font-medium text-foreground mb-1">No log entries</h2>
@@ -148,9 +171,20 @@ export default function LogsPage() {
           </p>
         </div>
       ) : (
-        <div className="rounded-lg border border-border overflow-hidden">
-          {filtered.map(entry => (
-            <LogRow key={entry.id} entry={entry} />
+        <div className="space-y-5">
+          {sections.map(section => (
+            <div key={section.key} className="space-y-2">
+              <div className="flex items-center gap-2 px-1">
+                <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: section.color }} />
+                <h2 className="text-sm font-medium text-foreground">{section.label}</h2>
+                <span className="text-xs text-muted-foreground">{section.items.length} entries</span>
+              </div>
+              <div className="rounded-lg border border-border overflow-hidden">
+                {section.items.map(entry => (
+                  <LogRow key={entry.id} entry={entry} />
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       )}

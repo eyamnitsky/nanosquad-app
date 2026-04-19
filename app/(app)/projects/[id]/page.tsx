@@ -96,6 +96,11 @@ export default function ProjectDetailPage() {
     getSkills().then(setTools).catch(() => setTools([]))
   }, [])
 
+  useEffect(() => {
+    if (!project?.squad_id) return
+    setRecurringForm(form => (form.squad_id ? form : { ...form, squad_id: project.squad_id! }))
+  }, [project?.squad_id])
+
   const handleSaveNotes = async () => {
     if (!project) return
     setSavingNotes(true)
@@ -190,6 +195,15 @@ export default function ProjectDetailPage() {
     )
   }
 
+  const projectSquad = project.squad_id
+    ? squads.find(squad => squad.id === project.squad_id) ?? null
+    : null
+  const projectSquadLabel = projectSquad?.name ?? project.squad_id ?? 'No squad'
+  const projectSquadColor = projectSquad?.color ?? '#6b7280'
+  const askHref = `/ask?project_id=${encodeURIComponent(project.id)}${
+    project.squad_id ? `&squad_id=${encodeURIComponent(project.squad_id)}` : ''
+  }`
+
   return (
     <>
       {/* Header */}
@@ -200,6 +214,15 @@ export default function ProjectDetailPage() {
         <div className="min-w-0">
           <h1 className="text-xl font-semibold text-foreground truncate">{project.name}</h1>
           <p className="text-sm text-muted-foreground mt-0.5 truncate">{project.description}</p>
+          <div className="mt-2">
+            <span
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
+              style={{ backgroundColor: `${projectSquadColor}20`, color: projectSquadColor }}
+            >
+              <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: projectSquadColor }} />
+              {projectSquadLabel}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -274,7 +297,7 @@ export default function ProjectDetailPage() {
             <div className="flex flex-col items-center justify-center py-12 text-center rounded-lg border border-border">
               <Play className="h-8 w-8 text-muted-foreground/40 mb-3" />
               <p className="text-sm text-muted-foreground">No runs in this project yet.</p>
-              <Link href={`/ask?project_id=${encodeURIComponent(project.id)}`}>
+              <Link href={askHref}>
                 <Button size="sm" variant="outline" className="mt-4 gap-1.5">
                   <Play className="h-3.5 w-3.5" /> Dispatch a task
                 </Button>

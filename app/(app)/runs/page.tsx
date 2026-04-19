@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { ChevronDown, ChevronRight, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { getRuns, getProjects, type Run, type RunStatus, type Project } from '@/lib/api'
+import { getRuns, getProjects, getSquads, type Run, type RunStatus, type Project, type Squad } from '@/lib/api'
 import { RunStatusBadge } from '@/components/run-status-badge'
 import { formatDistanceToNow, formatDuration } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -22,6 +22,13 @@ type RunGroup = {
   primary: Run
   runs: Run[]
   status: RunStatus
+}
+
+type SquadRunSection = {
+  key: string
+  label: string
+  color: string
+  groups: RunGroup[]
 }
 
 function runTs(run: Run): number {
@@ -53,6 +60,11 @@ function resolveGroupStatus(runs: Run[]): RunStatus {
   if (runs.some(run => run.status === 'failed')) return 'failed'
   if (runs.some(run => run.status === 'queued')) return 'queued'
   return 'completed'
+}
+
+function resolveGroupSquad(group: RunGroup): string | undefined {
+  if (group.primary.squad) return group.primary.squad
+  return group.runs.find(run => run.squad)?.squad
 }
 
 function groupRuns(sourceRuns: Run[]): RunGroup[] {
@@ -122,6 +134,7 @@ function groupRuns(sourceRuns: Run[]): RunGroup[] {
 export default function RunsPage() {
   const [runs, setRuns] = useState<Run[] | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
+  const [squads, setSquads] = useState<Squad[]>([])
   const [filter, setFilter] = useState<RunStatus | 'all'>('all')
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({})
 
@@ -130,6 +143,7 @@ export default function RunsPage() {
       .then(setRuns)
       .catch(() => setRuns([]))
     getProjects().then(setProjects).catch(() => setProjects([]))
+    getSquads().then(setSquads).catch(() => setSquads([]))
   }, [])
 
   const groups = useMemo(() => (runs ? groupRuns(runs) : null), [runs])
@@ -145,6 +159,28 @@ export default function RunsPage() {
   const toggleGroup = (groupId: string) => {
     setExpandedGroups(prev => ({ ...prev, [groupId]: !prev[groupId] }))
   }
+
+  const sections = useMemo(() => {
+    if (!filteredGroups) return null
+    const byKey = new Map<string, SquadRunSection>()
+    for (const group of filteredGroups) {
+      const squadId = resolveGroupSquad(group)
+      const squad = squadId ? squads.find(item => item.id === squadId) : undefined
+      const key = squad?.id ?? 'unassigned'
+      const existing = byKey.get(key)
+      if (existing) {
+        existing.groups.push(group)
+        continue
+      }
+      byKey.set(key, {
+        key,
+        label: squad?.name ?? (squadId ? squadId : 'No squad'),
+        color: squad?.color ?? '#6b7280',
+        groups: [group],
+      })
+    }
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label))
+  }, [filteredGroups, squads])
 
   return (
     <>
@@ -189,103 +225,115 @@ export default function RunsPage() {
         ))}
       </div>
 
-      {filteredGroups === null ? (
+      {sections === null ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="h-16 animate-pulse rounded-md bg-muted" />
           ))}
         </div>
-      ) : filteredGroups.length === 0 ? (
+      ) : sections.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center rounded-lg border border-border">
           <Play className="h-8 w-8 text-muted-foreground/40 mb-3" />
           <p className="text-sm text-muted-foreground">No runs match this filter.</p>
         </div>
       ) : (
-        <div className="rounded-lg border border-border overflow-hidden">
-          {filteredGroups.map((group, i) => {
-            const run = group.primary
-            const proj = projectName(run.project_id)
-            const isExpanded = Boolean(expandedGroups[group.id])
-            return (
-              <div
-                key={group.id}
-                className={cn(
-                  i < filteredGroups.length - 1 && 'border-b border-border'
-                )}
-              >
-                <div className="flex items-center gap-3 px-4 py-3.5 hover:bg-secondary/40 transition-colors">
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(group.id)}
-                    className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-                    aria-label={isExpanded ? 'Collapse run group' : 'Expand run group'}
-                  >
-                    {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  </button>
-
-                  <RunStatusBadge status={group.status} />
-
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm text-foreground truncate">{run.task}</p>
-                    <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
-                      <span className="font-mono text-brand">{run.agent}</span>
-                      {proj && (
-                        <>
-                          <span>·</span>
-                          <span className="truncate">{proj}</span>
-                        </>
-                      )}
-                      {run.agents_involved.length > 1 && (
-                        <>
-                          <span>·</span>
-                          <span>{run.agents_involved.length} agents</span>
-                        </>
-                      )}
-                      {group.runs.length > 1 && (
-                        <>
-                          <span>·</span>
-                          <span>{group.runs.length} interactions</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="text-right shrink-0 space-y-0.5">
-                    <p className="text-xs text-muted-foreground">{formatDistanceToNow(run.created_at)}</p>
-                    {run.duration_ms != null && (
-                      <p className="text-xs text-muted-foreground/60 font-mono">{formatDuration(run.duration_ms)}</p>
-                    )}
-                  </div>
-
-                  <Link
-                    href={`/runs/${run.id}`}
-                    className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-                  >
-                    Open
-                  </Link>
-                </div>
-
-                {isExpanded && group.runs.length > 1 && (
-                  <div className="bg-secondary/20 border-t border-border px-4 py-2.5">
-                    <div className="space-y-1.5">
-                      {group.runs.map(item => (
-                        <Link
-                          key={item.id}
-                          href={`/runs/${item.id}`}
-                          className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-secondary/70 transition-colors"
-                        >
-                          <RunStatusBadge status={item.status} />
-                          <span className="font-mono text-[11px] text-brand">{item.agent}</span>
-                          <span className="text-xs text-foreground truncate flex-1">{item.task}</span>
-                          <span className="text-[11px] text-muted-foreground shrink-0">{formatDistanceToNow(item.created_at)}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  </div>
-                )}
+        <div className="space-y-5">
+          {sections.map(section => (
+            <div key={section.key} className="space-y-2">
+              <div className="flex items-center gap-2 px-1">
+                <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: section.color }} />
+                <h2 className="text-sm font-medium text-foreground">{section.label}</h2>
+                <span className="text-xs text-muted-foreground">{section.groups.length} grouped runs</span>
               </div>
-            )
-          })}
+
+              <div className="rounded-lg border border-border overflow-hidden">
+                {section.groups.map((group, i) => {
+                  const run = group.primary
+                  const proj = projectName(run.project_id)
+                  const isExpanded = Boolean(expandedGroups[group.id])
+                  return (
+                    <div
+                      key={group.id}
+                      className={cn(
+                        i < section.groups.length - 1 && 'border-b border-border'
+                      )}
+                    >
+                      <div className="flex items-center gap-3 px-4 py-3.5 hover:bg-secondary/40 transition-colors">
+                        <button
+                          type="button"
+                          onClick={() => toggleGroup(group.id)}
+                          className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                          aria-label={isExpanded ? 'Collapse run group' : 'Expand run group'}
+                        >
+                          {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </button>
+
+                        <RunStatusBadge status={group.status} />
+
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-foreground truncate">{run.task}</p>
+                          <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
+                            <span className="font-mono text-brand">{run.agent}</span>
+                            {proj && (
+                              <>
+                                <span>·</span>
+                                <span className="truncate">{proj}</span>
+                              </>
+                            )}
+                            {run.agents_involved.length > 1 && (
+                              <>
+                                <span>·</span>
+                                <span>{run.agents_involved.length} agents</span>
+                              </>
+                            )}
+                            {group.runs.length > 1 && (
+                              <>
+                                <span>·</span>
+                                <span>{group.runs.length} interactions</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="text-right shrink-0 space-y-0.5">
+                          <p className="text-xs text-muted-foreground">{formatDistanceToNow(run.created_at)}</p>
+                          {run.duration_ms != null && (
+                            <p className="text-xs text-muted-foreground/60 font-mono">{formatDuration(run.duration_ms)}</p>
+                          )}
+                        </div>
+
+                        <Link
+                          href={`/runs/${run.id}`}
+                          className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                        >
+                          Open
+                        </Link>
+                      </div>
+
+                      {isExpanded && group.runs.length > 1 && (
+                        <div className="bg-secondary/20 border-t border-border px-4 py-2.5">
+                          <div className="space-y-1.5">
+                            {group.runs.map(item => (
+                              <Link
+                                key={item.id}
+                                href={`/runs/${item.id}`}
+                                className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-secondary/70 transition-colors"
+                              >
+                                <RunStatusBadge status={item.status} />
+                                <span className="font-mono text-[11px] text-brand">{item.agent}</span>
+                                <span className="text-xs text-foreground truncate flex-1">{item.task}</span>
+                                <span className="text-[11px] text-muted-foreground shrink-0">{formatDistanceToNow(item.created_at)}</span>
+                              </Link>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </>
