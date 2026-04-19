@@ -2,8 +2,8 @@
 
 import { useEffect, useReducer, useRef, useState } from 'react'
 import {
-  Check, ChevronDown, ChevronUp, Edit2, Eye, EyeOff,
-  Loader2, RefreshCw, Trash2, X, Zap,
+  Check, ChevronDown, ChevronUp, Edit2,
+  Eye, EyeOff, Loader2, Trash2, X, Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -31,6 +31,11 @@ const SERVICE_META: Record<EnvService, { label: string; description: string; can
     description: 'Web search skill backend — powers the web_search skill.',
     canTest: true,
   },
+  brevo: {
+    label: 'Brevo',
+    description: 'Email delivery and SMTP configuration for notification flows.',
+    canTest: false,
+  },
   general: {
     label: 'General Platform',
     description: 'Core platform settings and server configuration.',
@@ -38,18 +43,29 @@ const SERVICE_META: Record<EnvService, { label: string; description: string; can
   },
 }
 
-const SERVICE_ORDER: EnvService[] = ['openrouter', 'telegram', 'brave', 'general']
+const SERVICE_ORDER: EnvService[] = ['openrouter', 'telegram', 'brave', 'brevo', 'general']
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function getServiceStatus(vars: EnvVar[]): 'fully_configured' | 'partially_configured' | 'not_configured' {
+  if (vars.length === 0) return 'not_configured'
+
   const required = vars.filter(v => v.required)
   const allSet = vars.every(v => v.is_set)
   const anySet = vars.some(v => v.is_set)
-  const requiredMet = required.length === 0 || required.every(v => v.is_set)
-  if (allSet || (requiredMet && vars.every(v => !v.required || v.is_set))) return 'fully_configured'
+  const requiredMet = required.every(v => v.is_set)
+
+  // If a service has no required vars, "fully configured" should mean all
+  // known vars are set; otherwise it is partial/not configured.
+  if (required.length === 0) {
+    if (allSet) return 'fully_configured'
+    if (anySet) return 'partially_configured'
+    return 'not_configured'
+  }
+
+  if (requiredMet) return 'fully_configured'
   if (anySet) return 'partially_configured'
   return 'not_configured'
 }
@@ -69,6 +85,12 @@ function StatusPill({ status }: { status: ReturnType<typeof getServiceStatus> })
   )
 }
 
+function maskSecret(value?: string): string {
+  if (!value) return ''
+  if (value.length <= 8) return '•'.repeat(Math.max(8, value.length))
+  return `${value.slice(0, 4)}${'•'.repeat(8)}${value.slice(-4)}`
+}
+
 // ---------------------------------------------------------------------------
 // Single variable row
 // ---------------------------------------------------------------------------
@@ -82,9 +104,9 @@ interface VarRowProps {
 function VarRow({ envVar, onSave, onClear }: VarRowProps) {
   const [editing, setEditing] = useState(false)
   const [inputValue, setInputValue] = useState('')
-  const [showMasked, setShowMasked] = useState(false)
   const [saving, setSaving] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const [revealed, setRevealed] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleEdit = () => {
@@ -98,12 +120,14 @@ function VarRow({ envVar, onSave, onClear }: VarRowProps) {
     setSaving(true)
     await onSave(envVar.key, inputValue.trim())
     setSaving(false)
+    setRevealed(false)
     setEditing(false)
     setInputValue('')
   }
 
   const handleClear = async () => {
     setClearing(true)
+    setRevealed(false)
     await onClear(envVar.key)
     setClearing(false)
   }
@@ -135,15 +159,17 @@ function VarRow({ envVar, onSave, onClear }: VarRowProps) {
           {/* Value display */}
           {envVar.is_set && !editing && (
             <div className="flex items-center gap-1.5">
-              <span className="font-mono text-xs text-foreground/70">
-                {showMasked ? envVar.masked_value : '••••••••'}
+              <span className="font-mono text-xs text-foreground/70 break-all max-w-[24rem]">
+                {revealed ? envVar.value : maskSecret(envVar.value)}
               </span>
               <button
-                onClick={() => setShowMasked(s => !s)}
-                className="text-muted-foreground hover:text-foreground transition-colors"
-                title={showMasked ? 'Hide' : 'Reveal masked value'}
+                type="button"
+                onClick={() => setRevealed(value => !value)}
+                className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                title={revealed ? 'Hide value' : 'Show value'}
+                aria-label={revealed ? `Hide ${envVar.key}` : `Show ${envVar.key}`}
               >
-                {showMasked ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
               </button>
             </div>
           )}
@@ -157,7 +183,7 @@ function VarRow({ envVar, onSave, onClear }: VarRowProps) {
             <div className="flex items-center gap-1.5">
               <Input
                 ref={inputRef}
-                type="password"
+                type="text"
                 value={inputValue}
                 onChange={e => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
@@ -321,7 +347,7 @@ function ServiceSection({ service, vars, onSave, onClear }: ServiceSectionProps)
 
 type EnvAction =
   | { type: 'LOADED'; vars: EnvVar[] }
-  | { type: 'SET'; key: string; masked_value: string }
+  | { type: 'SET'; key: string; value: string }
   | { type: 'CLEAR'; key: string }
 
 function envReducer(state: EnvVar[], action: EnvAction): EnvVar[] {
@@ -330,13 +356,13 @@ function envReducer(state: EnvVar[], action: EnvAction): EnvVar[] {
     case 'SET':
       return state.map(v =>
         v.key === action.key
-          ? { ...v, is_set: true, masked_value: action.masked_value }
+          ? { ...v, is_set: true, value: action.value }
           : v
       )
     case 'CLEAR':
       return state.map(v =>
         v.key === action.key
-          ? { ...v, is_set: false, masked_value: undefined }
+          ? { ...v, is_set: false, value: undefined }
           : v
       )
   }
@@ -359,14 +385,10 @@ export function EnvTab() {
   }, [])
 
   const handleSave = async (key: string, value: string) => {
-    // Optimistic: generate a masked preview locally
-    const masked = value.length > 8
-      ? `${value.slice(0, 4)}****${value.slice(-4)}`
-      : '****'
-    dispatch({ type: 'SET', key, masked_value: masked })
+    dispatch({ type: 'SET', key, value })
     try {
       const updated = await putEnv({ key, value })
-      dispatch({ type: 'SET', key, masked_value: updated.masked_value ?? masked })
+      dispatch({ type: 'SET', key, value: updated.value ?? value })
       toast({ title: 'Saved', description: key })
     } catch {
       toast({ title: 'Save failed', description: key, variant: 'destructive' })
@@ -404,9 +426,9 @@ export function EnvTab() {
       <div className="rounded-lg border border-border bg-secondary/50 px-4 py-3 flex items-start gap-3">
         <span className="mt-0.5 shrink-0 h-1.5 w-1.5 rounded-full bg-yellow-500 mt-2" />
         <p className="text-xs text-muted-foreground leading-relaxed">
-          Values are stored in the NanoSquad backend&apos;s local environment and are never transmitted externally.
-          Raw secret values are never returned after saving — only masked previews are shown.
-          Restart the backend after changing core variables like <code className="font-mono">AGENT_PLATFORM_PORT</code>.
+          Values are sourced from <code className="font-mono">~/.nemoclaw/config/env.local</code>.
+          Only keys present in that file are shown here (including empty values).
+          Values are masked by default; use the eye icon to reveal full values.
         </p>
       </div>
 

@@ -11,6 +11,12 @@ import YAML from 'yaml'
 
 const execFileAsync = promisify(execFile)
 
+function expandHomePath(input: string): string {
+  if (input === '~') return os.homedir()
+  if (input.startsWith('~/')) return path.join(os.homedir(), input.slice(2))
+  return input
+}
+
 const ROOT = process.cwd()
 const PATHS = {
   agents: path.join(ROOT, 'agents'),
@@ -25,12 +31,37 @@ const PATHS = {
 }
 
 const SETTINGS_PATH = path.join(PATHS.config, 'settings.json')
-const ENV_LOCAL_PATH = path.join(PATHS.config, 'env.local')
+const NEMOCLAW_HOME = path.resolve(
+  expandHomePath(process.env.NEMOCLAW_HOME?.trim() || path.join(os.homedir(), '.nemoclaw'))
+)
+const DEFAULT_MANAGED_ENV_PATH = path.join(NEMOCLAW_HOME, 'config', 'env.local')
+const LEGACY_ENV_LOCAL_PATH = path.join(PATHS.config, 'env.local')
+const ENV_LOCAL_PATH = path.resolve(
+  expandHomePath(process.env.AGENTPLATFORM_ENV_LOCAL_PATH?.trim() || DEFAULT_MANAGED_ENV_PATH)
+)
+const ONBOARD_SESSION_PATH = path.join(NEMOCLAW_HOME, 'onboard-session.json')
 const AUDIT_LOG_PATH = path.join(PATHS.logs, 'audit.jsonl')
 const LOGS_DOWNLOAD_PATH = path.join(PATHS.logs, 'audit.jsonl')
 
 const ENV_BLOCK_START = '# >>> AgentPlatform env vars >>>'
 const ENV_BLOCK_END = '# <<< AgentPlatform env vars <<<'
+const NEMOCLAW_WORKSPACE_PATH = process.env.NEMOCLAW_WORKSPACE_PATH?.trim() || '/sandbox/.openclaw-data/workspace'
+const NEMOCLAW_REGISTRY_FILENAME = 'NANOSQUAD_REGISTRY.md'
+const IDENTITY_GUIDANCE_START = '<!-- nanosquad-registry-guidance:start -->'
+const IDENTITY_GUIDANCE_END = '<!-- nanosquad-registry-guidance:end -->'
+const NEMOCLAW_AGENT_SYNC_TEMPLATE_DOCKERFILE_PATH = path.resolve(
+  expandHomePath(process.env.NEMOCLAW_AGENT_SYNC_TEMPLATE_DOCKERFILE?.trim() || path.join(NEMOCLAW_HOME, 'source', 'Dockerfile'))
+)
+const NEMOCLAW_AGENT_SYNC_OUTPUT_DOCKERFILE_PATH = path.resolve(
+  expandHomePath(process.env.NEMOCLAW_AGENT_SYNC_DOCKERFILE?.trim() || path.join(NEMOCLAW_HOME, 'source', 'Dockerfile.nanosquad'))
+)
+const NEMOCLAW_AGENT_SYNC_LOG_PATH = path.join(PATHS.logs, 'nemoclaw-agent-sync.log')
+const NEMOCLAW_AGENT_SYNC_DEBOUNCE_MS = Number(process.env.NEMOCLAW_AGENT_SYNC_DEBOUNCE_MS ?? '4000')
+const NEMOCLAW_AGENT_SYNC_TIMEOUT_MS = Number(process.env.NEMOCLAW_AGENT_SYNC_TIMEOUT_SECONDS ?? '1800') * 1000
+const NEMOCLAW_RUN_SYNC_MIN_INTERVAL_MS = Number(process.env.NEMOCLAW_RUN_SYNC_MIN_INTERVAL_MS ?? '6000')
+const NEMOCLAW_RUN_SYNC_TIMEOUT_MS = Number(process.env.NEMOCLAW_RUN_SYNC_TIMEOUT_SECONDS ?? '20') * 1000
+const PROJECT_RECURRING_TASKS_FILENAME = 'recurring-tasks.json'
+const RECURRING_TASK_TICK_MS = Number(process.env.RECURRING_TASK_TICK_SECONDS ?? '30') * 1000
 
 dotenv.config({ path: path.join(ROOT, '.env') })
 
@@ -45,6 +76,8 @@ interface Agent {
   temperature?: number
   status: 'idle' | 'running'
   squad_id?: string
+  global_coordinator?: boolean
+  telegram_entrypoint?: boolean
 }
 
 interface Skill {
@@ -77,6 +110,33 @@ interface Project {
   updated_at: string
   run_count: number
   artifact_count: number
+}
+
+type RecurringTaskUnit = 'minutes' | 'hours' | 'days'
+type RecurringWeekday = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat'
+
+interface RecurringTask {
+  id: string
+  project_id: string
+  title: string
+  task: string
+  monitoring_guidance?: string
+  tools: string[]
+  agent?: string
+  squad_id?: string
+  every_value: number
+  every_unit: RecurringTaskUnit
+  weekdays: RecurringWeekday[]
+  run_hour: number
+  run_minute: number
+  start_at?: string
+  enabled: boolean
+  last_run_at?: string
+  next_run_at: string
+  last_status?: 'success' | 'failed'
+  last_error?: string
+  created_at: string
+  updated_at: string
 }
 
 type RunStatus = 'queued' | 'running' | 'completed' | 'failed'
@@ -157,6 +217,62 @@ interface AuditEntry {
   output: string
 }
 
+interface OnboardSessionSnapshot {
+  sandboxName?: string
+  provider?: string
+  model?: string
+  endpointUrl?: string | null
+  credentialEnv?: string | null
+  preferredInferenceApi?: string | null
+  policyPresets?: string[]
+}
+
+interface NemoclawRuntimeSyncStatus {
+  enabled: boolean
+  status: 'idle' | 'queued' | 'running' | 'success' | 'failed'
+  queue_depth: number
+  last_trigger?: string
+  last_requested_at?: string
+  last_started_at?: string
+  last_finished_at?: string
+  last_result_message?: string
+  last_error_message?: string
+  last_agent_count?: number
+}
+
+interface OpenClawSessionSummary {
+  key: string
+  sessionId: string
+  agentId: string
+  model?: string
+  updatedAt?: number
+  kind?: string
+}
+
+interface OpenClawSessionsPayload {
+  sessions?: OpenClawSessionSummary[]
+}
+
+interface TranscriptToolCall {
+  name: string
+  arguments: Record<string, unknown>
+}
+
+interface TranscriptMessageRecord {
+  role?: string
+  content?: unknown
+  model?: string
+  toolName?: string
+  details?: Record<string, unknown>
+}
+
+interface TranscriptEvent {
+  type?: string
+  id?: string
+  timestamp?: string
+  message?: TranscriptMessageRecord
+}
+
 const DEFAULT_SETTINGS: Settings = {
   default_model: 'openai/gpt-4o-mini',
   dispatcher_model: 'openai/gpt-4o-mini',
@@ -232,6 +348,48 @@ const ENV_SCHEMA = [
     required: false,
   },
   {
+    service: 'brevo',
+    key: 'BREVO_API_KEY',
+    label: 'Brevo API Key',
+    description: 'API key for Brevo transactional/email integrations.',
+    required: false,
+  },
+  {
+    service: 'brevo',
+    key: 'BREVO_SMTP_HOST',
+    label: 'Brevo SMTP Host',
+    description: 'SMTP hostname for Brevo relay.',
+    required: false,
+  },
+  {
+    service: 'brevo',
+    key: 'BREVO_SMTP_PORT',
+    label: 'Brevo SMTP Port',
+    description: 'SMTP port for Brevo relay.',
+    required: false,
+  },
+  {
+    service: 'brevo',
+    key: 'BREVO_SMTP_LOGIN',
+    label: 'Brevo SMTP Login',
+    description: 'SMTP login/username for Brevo relay.',
+    required: false,
+  },
+  {
+    service: 'brevo',
+    key: 'BREVO_TO_EMAIL',
+    label: 'Brevo Default Recipient Email',
+    description: 'Default recipient email used by Brevo flows.',
+    required: false,
+  },
+  {
+    service: 'brevo',
+    key: 'BREVO_TO_NAME',
+    label: 'Brevo Default Recipient Name',
+    description: 'Default recipient display name used by Brevo flows.',
+    required: false,
+  },
+  {
     service: 'general',
     key: 'MODEL_PROVIDER',
     label: 'Model Provider',
@@ -243,6 +401,13 @@ const ENV_SCHEMA = [
     key: 'NEMOCLAW_CLI_PATH',
     label: 'NemoClaw CLI Path',
     description: 'Absolute path to NemoClaw CLI executable for skill invocation.',
+    required: false,
+  },
+  {
+    service: 'general',
+    key: 'NEMOCLAW_ENDPOINT_URL',
+    label: 'NemoClaw Inference Endpoint',
+    description: 'Optional OpenAI-compatible endpoint for local inference (for example Ollama).',
     required: false,
   },
   {
@@ -276,13 +441,6 @@ function safeFileKey(input: string): string {
     throw new Error('Invalid identifier')
   }
   return value
-}
-
-function maskValue(value?: string): string | undefined {
-  if (!value) return undefined
-  if (value.length <= 4) return '*'.repeat(value.length)
-  if (value.length <= 8) return `${value.slice(0, 2)}****`
-  return `${value.slice(0, 4)}****${value.slice(-4)}`
 }
 
 function toJsonLine(entry: unknown): string {
@@ -402,10 +560,21 @@ async function writeEnvLocalMap(map: Map<string, string>): Promise<void> {
   await writeText(ENV_LOCAL_PATH, body)
 }
 
+async function maybeMigrateLegacyEnvLocal(): Promise<void> {
+  if (path.resolve(ENV_LOCAL_PATH) === path.resolve(LEGACY_ENV_LOCAL_PATH)) return
+  const [targetExists, legacyExists] = await Promise.all([
+    pathExists(ENV_LOCAL_PATH),
+    pathExists(LEGACY_ENV_LOCAL_PATH),
+  ])
+  if (targetExists || !legacyExists) return
+  const legacyRaw = await readText(LEGACY_ENV_LOCAL_PATH, '')
+  await writeText(ENV_LOCAL_PATH, legacyRaw)
+}
+
 async function hydrateProcessEnvFromLocal(): Promise<void> {
   const map = await loadEnvLocalMap()
   for (const [key, value] of map.entries()) {
-    if (!process.env[key]) process.env[key] = value
+    process.env[key] = value
   }
 }
 
@@ -437,7 +606,11 @@ async function syncEnvToZshrc(map: Map<string, string>): Promise<void> {
 }
 
 async function ensureBaseStructure(): Promise<void> {
-  await Promise.all(Object.values(PATHS).map(ensureDir))
+  await Promise.all([
+    ...Object.values(PATHS).map(ensureDir),
+    ensureDir(path.dirname(ENV_LOCAL_PATH)),
+  ])
+  await maybeMigrateLegacyEnvLocal()
   if (!(await pathExists(ENV_LOCAL_PATH))) {
     await writeText(ENV_LOCAL_PATH, '')
   }
@@ -517,6 +690,8 @@ async function listAgents(): Promise<Agent[]> {
       temperature: a.temperature,
       status: (a.status === 'running' ? 'running' : 'idle') as Agent['status'],
       squad_id: a.squad_id,
+      global_coordinator: Boolean(a.global_coordinator),
+      telegram_entrypoint: Boolean(a.telegram_entrypoint),
     }))
     .sort((a, b) => a.name.localeCompare(b.name))
 }
@@ -538,6 +713,8 @@ async function getAgent(name: string): Promise<Agent | null> {
     temperature: raw.temperature,
     status: raw.status === 'running' ? 'running' : 'idle',
     squad_id: raw.squad_id,
+    global_coordinator: Boolean(raw.global_coordinator),
+    telegram_entrypoint: Boolean(raw.telegram_entrypoint),
   }
 }
 
@@ -554,6 +731,8 @@ async function putAgent(name: string, payload: Partial<Agent>): Promise<Agent> {
     temperature: payload.temperature ?? current?.temperature,
     status: payload.status === 'running' ? 'running' : current?.status ?? 'idle',
     squad_id: payload.squad_id ?? current?.squad_id,
+    global_coordinator: payload.global_coordinator ?? current?.global_coordinator ?? false,
+    telegram_entrypoint: payload.telegram_entrypoint ?? current?.telegram_entrypoint ?? false,
   }
 
   const oldKey = safeFileKey(name)
@@ -724,7 +903,10 @@ async function putSquad(id: string, payload: Partial<Squad>): Promise<Squad> {
     merged.members = [merged.orchestrator, ...merged.members]
   }
   if (merged.telegram_contact_agent && !merged.members.includes(merged.telegram_contact_agent)) {
-    merged.members = [merged.telegram_contact_agent, ...merged.members]
+    const contactAgent = await getAgent(merged.telegram_contact_agent)
+    if (!contactAgent?.global_coordinator) {
+      merged.members = [merged.telegram_contact_agent, ...merged.members]
+    }
   }
 
   await writeSquad(merged)
@@ -833,6 +1015,425 @@ async function deleteProject(id: string): Promise<void> {
   }
 }
 
+function recurringTasksFilePath(projectId: string): string {
+  return path.join(PATHS.projects, safeFileKey(projectId), PROJECT_RECURRING_TASKS_FILENAME)
+}
+
+function normalizeRecurringUnit(value: unknown): RecurringTaskUnit {
+  if (value === 'minutes' || value === 'hours' || value === 'days') return value
+  return 'days'
+}
+
+function normalizeRecurringEveryValue(value: unknown): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 1
+  return Math.min(10_000, Math.max(1, Math.round(numeric)))
+}
+
+const WEEKDAY_KEYS: RecurringWeekday[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+
+function normalizeRecurringWeekdays(value: unknown): RecurringWeekday[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<RecurringWeekday>()
+  const days: RecurringWeekday[] = []
+  for (const item of value) {
+    const day = String(item ?? '').trim().toLowerCase() as RecurringWeekday
+    if (!WEEKDAY_KEYS.includes(day)) continue
+    if (seen.has(day)) continue
+    seen.add(day)
+    days.push(day)
+  }
+  return days
+}
+
+function normalizeRecurringHour(value: unknown): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 9
+  return Math.min(23, Math.max(0, Math.round(numeric)))
+}
+
+function normalizeRecurringMinute(value: unknown): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 0
+  return Math.min(59, Math.max(0, Math.round(numeric)))
+}
+
+function normalizeRecurringTools(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const tools: string[] = []
+  for (const item of value) {
+    const name = String(item ?? '').trim()
+    if (!name) continue
+    if (seen.has(name)) continue
+    seen.add(name)
+    tools.push(name)
+  }
+  return tools.slice(0, 50)
+}
+
+function recurringUnitMs(unit: RecurringTaskUnit): number {
+  if (unit === 'minutes') return 60_000
+  if (unit === 'hours') return 60 * 60_000
+  return 24 * 60 * 60_000
+}
+
+function nextRecurringRunAtInterval(baseIso: string, everyValue: number, everyUnit: RecurringTaskUnit): string {
+  const baseMs = Date.parse(baseIso)
+  const safeBaseMs = Number.isFinite(baseMs) ? baseMs : Date.now()
+  const nextMs = safeBaseMs + normalizeRecurringEveryValue(everyValue) * recurringUnitMs(everyUnit)
+  return new Date(nextMs).toISOString()
+}
+
+function weekdayIndex(day: RecurringWeekday): number {
+  return WEEKDAY_KEYS.indexOf(day)
+}
+
+function nextRecurringRunAtWeekly(baseIso: string, weekdays: RecurringWeekday[], runHour: number, runMinute: number): string {
+  const baseMs = Date.parse(baseIso)
+  const base = Number.isFinite(baseMs) ? new Date(baseMs) : new Date()
+  const targetDays: RecurringWeekday[] = weekdays.length > 0 ? weekdays : ['mon']
+
+  let best: Date | null = null
+  for (let offset = 0; offset < 14; offset += 1) {
+    const candidate = new Date(base)
+    candidate.setSeconds(0, 0)
+    candidate.setDate(base.getDate() + offset)
+    const day = candidate.getDay()
+    const matches = targetDays.some(target => weekdayIndex(target) === day)
+    if (!matches) continue
+
+    candidate.setHours(runHour, runMinute, 0, 0)
+    if (candidate.getTime() <= base.getTime()) continue
+    if (!best || candidate.getTime() < best.getTime()) {
+      best = candidate
+    }
+  }
+
+  if (!best) {
+    const fallback = new Date(base)
+    fallback.setDate(base.getDate() + 1)
+    fallback.setHours(runHour, runMinute, 0, 0)
+    return fallback.toISOString()
+  }
+  return best.toISOString()
+}
+
+function computeNextRecurringRunAt(task: Pick<RecurringTask, 'every_value' | 'every_unit' | 'weekdays' | 'run_hour' | 'run_minute'>, baseIso: string): string {
+  if (task.weekdays.length > 0) {
+    return nextRecurringRunAtWeekly(baseIso, task.weekdays, task.run_hour, task.run_minute)
+  }
+  return nextRecurringRunAtInterval(baseIso, task.every_value, task.every_unit)
+}
+
+function normalizeRecurringTask(record: Partial<RecurringTask>, projectId: string): RecurringTask | null {
+  if (!record.id || typeof record.id !== 'string') return null
+  if (!record.task || typeof record.task !== 'string') return null
+
+  const every_unit = normalizeRecurringUnit(record.every_unit)
+  const every_value = normalizeRecurringEveryValue(record.every_value)
+  const weekdays = normalizeRecurringWeekdays(record.weekdays)
+  const run_hour = normalizeRecurringHour(record.run_hour)
+  const run_minute = normalizeRecurringMinute(record.run_minute)
+  const created_at = typeof record.created_at === 'string' ? record.created_at : nowIso()
+  const updated_at = typeof record.updated_at === 'string' ? record.updated_at : created_at
+  const start_at = typeof record.start_at === 'string' && record.start_at.trim() ? record.start_at : undefined
+  const nextBaseIso = start_at && Date.parse(start_at) > Date.now() ? start_at : nowIso()
+  const nextFallback = computeNextRecurringRunAt(
+    { every_value, every_unit, weekdays, run_hour, run_minute },
+    nextBaseIso
+  )
+
+  return {
+    id: record.id,
+    project_id: projectId,
+    title: typeof record.title === 'string' ? record.title : '',
+    task: record.task.trim(),
+    monitoring_guidance:
+      typeof record.monitoring_guidance === 'string' && record.monitoring_guidance.trim()
+        ? record.monitoring_guidance
+        : undefined,
+    tools: normalizeRecurringTools(record.tools),
+    agent: typeof record.agent === 'string' && record.agent.trim() ? record.agent.trim() : undefined,
+    squad_id: typeof record.squad_id === 'string' && record.squad_id.trim() ? record.squad_id.trim() : undefined,
+    every_value,
+    every_unit,
+    weekdays,
+    run_hour,
+    run_minute,
+    start_at,
+    enabled: record.enabled !== false,
+    last_run_at: typeof record.last_run_at === 'string' ? record.last_run_at : undefined,
+    next_run_at:
+      typeof record.next_run_at === 'string' && record.next_run_at.trim()
+        ? record.next_run_at
+        : nextFallback,
+    last_status: record.last_status === 'failed' ? 'failed' : record.last_status === 'success' ? 'success' : undefined,
+    last_error: typeof record.last_error === 'string' && record.last_error.trim() ? record.last_error : undefined,
+    created_at,
+    updated_at,
+  }
+}
+
+async function listProjectRecurringTasks(projectId: string): Promise<RecurringTask[]> {
+  const filePath = recurringTasksFilePath(projectId)
+  const raw = await readJsonFile<Array<Partial<RecurringTask>>>(filePath, [])
+  const tasks: RecurringTask[] = []
+  for (const item of raw) {
+    const normalized = normalizeRecurringTask(item, projectId)
+    if (normalized) tasks.push(normalized)
+  }
+  return tasks.sort((a, b) => a.next_run_at.localeCompare(b.next_run_at))
+}
+
+async function writeProjectRecurringTasks(projectId: string, tasks: RecurringTask[]): Promise<void> {
+  const filePath = recurringTasksFilePath(projectId)
+  await writeJsonFile(filePath, tasks)
+}
+
+async function createProjectRecurringTask(
+  projectId: string,
+  payload: Partial<RecurringTask>
+): Promise<RecurringTask> {
+  const taskText = String(payload.task ?? '').trim()
+  if (!taskText) throw new Error('task is required')
+
+  const every_unit = normalizeRecurringUnit(payload.every_unit)
+  const every_value = normalizeRecurringEveryValue(payload.every_value)
+  const weekdays = normalizeRecurringWeekdays(payload.weekdays)
+  const run_hour = normalizeRecurringHour(payload.run_hour)
+  const run_minute = normalizeRecurringMinute(payload.run_minute)
+  const startAtRaw = typeof payload.start_at === 'string' ? payload.start_at.trim() : ''
+  const startAtIso =
+    startAtRaw && Number.isFinite(Date.parse(startAtRaw))
+      ? new Date(Date.parse(startAtRaw)).toISOString()
+      : undefined
+
+  const now = nowIso()
+  const nextBaseIso = startAtIso && Date.parse(startAtIso) > Date.now() ? startAtIso : now
+  const next_run_at = computeNextRecurringRunAt(
+    { every_value, every_unit, weekdays, run_hour, run_minute },
+    nextBaseIso
+  )
+
+  const selectedTools = normalizeRecurringTools(payload.tools)
+  if (selectedTools.length > 0) {
+    const skillNames = new Set((await listSkills()).map(skill => skill.name))
+    const unknownTools = selectedTools.filter(tool => !skillNames.has(tool))
+    if (unknownTools.length > 0) {
+      throw new Error(`Unknown tools: ${unknownTools.join(', ')}`)
+    }
+  }
+
+  const task: RecurringTask = {
+    id: `rt-${Date.now()}-${randomUUID().slice(0, 6)}`,
+    project_id: projectId,
+    title: String(payload.title ?? '').trim(),
+    task: taskText,
+    monitoring_guidance:
+      typeof payload.monitoring_guidance === 'string' && payload.monitoring_guidance.trim()
+        ? payload.monitoring_guidance.trim()
+        : undefined,
+    tools: selectedTools,
+    agent: typeof payload.agent === 'string' && payload.agent.trim() ? payload.agent.trim() : undefined,
+    squad_id: typeof payload.squad_id === 'string' && payload.squad_id.trim() ? payload.squad_id.trim() : undefined,
+    every_value,
+    every_unit,
+    weekdays,
+    run_hour,
+    run_minute,
+    start_at: startAtIso,
+    enabled: payload.enabled !== false,
+    next_run_at,
+    created_at: now,
+    updated_at: now,
+  }
+
+  const tasks = await listProjectRecurringTasks(projectId)
+  tasks.push(task)
+  await writeProjectRecurringTasks(projectId, tasks)
+  return task
+}
+
+async function updateProjectRecurringTask(
+  projectId: string,
+  taskId: string,
+  payload: Partial<RecurringTask>
+): Promise<RecurringTask> {
+  const tasks = await listProjectRecurringTasks(projectId)
+  const index = tasks.findIndex(task => task.id === taskId)
+  if (index < 0) throw new Error('Recurring task not found')
+
+  const current = tasks[index]
+  const every_unit = payload.every_unit ? normalizeRecurringUnit(payload.every_unit) : current.every_unit
+  const every_value =
+    payload.every_value !== undefined
+      ? normalizeRecurringEveryValue(payload.every_value)
+      : current.every_value
+  const weekdays = payload.weekdays !== undefined ? normalizeRecurringWeekdays(payload.weekdays) : current.weekdays
+  const run_hour = payload.run_hour !== undefined ? normalizeRecurringHour(payload.run_hour) : current.run_hour
+  const run_minute = payload.run_minute !== undefined ? normalizeRecurringMinute(payload.run_minute) : current.run_minute
+
+  let next_run_at = current.next_run_at
+  if (typeof payload.next_run_at === 'string' && payload.next_run_at.trim()) {
+    next_run_at = payload.next_run_at
+  } else if (
+    payload.every_unit !== undefined ||
+    payload.every_value !== undefined ||
+    payload.weekdays !== undefined ||
+    payload.run_hour !== undefined ||
+    payload.run_minute !== undefined
+  ) {
+    const base = current.last_run_at ?? nowIso()
+    next_run_at = computeNextRecurringRunAt(
+      { every_value, every_unit, weekdays, run_hour, run_minute },
+      base
+    )
+  }
+
+  const startAtRaw =
+    payload.start_at === undefined
+      ? current.start_at
+      : typeof payload.start_at === 'string' && payload.start_at.trim() && Number.isFinite(Date.parse(payload.start_at))
+        ? new Date(Date.parse(payload.start_at)).toISOString()
+        : undefined
+
+  let nextTools = current.tools
+  if (payload.tools !== undefined) {
+    const normalized = normalizeRecurringTools(payload.tools)
+    if (normalized.length > 0) {
+      const skillNames = new Set((await listSkills()).map(skill => skill.name))
+      const unknownTools = normalized.filter(tool => !skillNames.has(tool))
+      if (unknownTools.length > 0) {
+        throw new Error(`Unknown tools: ${unknownTools.join(', ')}`)
+      }
+    }
+    nextTools = normalized
+  }
+
+  const nextTask: RecurringTask = {
+    ...current,
+    title: payload.title !== undefined ? String(payload.title ?? '').trim() : current.title,
+    task: payload.task !== undefined ? String(payload.task ?? '').trim() : current.task,
+    monitoring_guidance:
+      payload.monitoring_guidance !== undefined
+        ? String(payload.monitoring_guidance ?? '').trim() || undefined
+        : current.monitoring_guidance,
+    tools: nextTools,
+    agent:
+      payload.agent !== undefined
+        ? String(payload.agent ?? '').trim() || undefined
+        : current.agent,
+    squad_id:
+      payload.squad_id !== undefined
+        ? String(payload.squad_id ?? '').trim() || undefined
+        : current.squad_id,
+    every_value,
+    every_unit,
+    weekdays,
+    run_hour,
+    run_minute,
+    start_at: startAtRaw,
+    enabled: payload.enabled !== undefined ? Boolean(payload.enabled) : current.enabled,
+    last_run_at: payload.last_run_at !== undefined ? payload.last_run_at : current.last_run_at,
+    next_run_at,
+    last_status: payload.last_status !== undefined ? payload.last_status : current.last_status,
+    last_error: payload.last_error !== undefined ? payload.last_error : current.last_error,
+    updated_at: nowIso(),
+  }
+
+  if (!nextTask.task.trim()) {
+    throw new Error('task is required')
+  }
+
+  tasks[index] = nextTask
+  await writeProjectRecurringTasks(projectId, tasks)
+  return nextTask
+}
+
+async function deleteProjectRecurringTask(projectId: string, taskId: string): Promise<void> {
+  const tasks = await listProjectRecurringTasks(projectId)
+  const filtered = tasks.filter(task => task.id !== taskId)
+  await writeProjectRecurringTasks(projectId, filtered)
+}
+
+async function listAllProjectRecurringTasks(): Promise<RecurringTask[]> {
+  const entries = await fs.readdir(PATHS.projects, { withFileTypes: true })
+  const dirs = entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
+  const all = await Promise.all(dirs.map(dir => listProjectRecurringTasks(dir).catch(() => [])))
+  return all.flat()
+}
+
+const recurringTaskLocks = new Set<string>()
+let recurringTaskTickInProgress = false
+
+async function executeRecurringTask(task: RecurringTask): Promise<void> {
+  const lockKey = `${task.project_id}:${task.id}`
+  if (recurringTaskLocks.has(lockKey)) return
+  recurringTaskLocks.add(lockKey)
+
+  try {
+    const contextChunks: string[] = []
+    if (task.monitoring_guidance?.trim()) {
+      contextChunks.push(`Monitoring guidance:\n${task.monitoring_guidance.trim()}`)
+    }
+    if (task.tools.length > 0) {
+      contextChunks.push(`Preferred tools for this monitoring task: ${task.tools.join(', ')}`)
+    }
+
+    await runTask({
+      task: task.task,
+      preferredAgent: task.agent,
+      project_id: task.project_id,
+      preferredSquadId: task.squad_id,
+      task_context: contextChunks.length > 0 ? contextChunks.join('\n\n') : undefined,
+    })
+
+    await updateProjectRecurringTask(task.project_id, task.id, {
+      last_run_at: nowIso(),
+      last_status: 'success',
+      last_error: undefined,
+      next_run_at: computeNextRecurringRunAt(task, nowIso()),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Recurring task execution failed'
+    await updateProjectRecurringTask(task.project_id, task.id, {
+      last_run_at: nowIso(),
+      last_status: 'failed',
+      last_error: message,
+      next_run_at: computeNextRecurringRunAt(task, nowIso()),
+    }).catch(() => null)
+    console.warn(`Recurring task ${task.id} failed: ${message}`)
+  } finally {
+    recurringTaskLocks.delete(lockKey)
+  }
+}
+
+async function tickRecurringTasks(): Promise<void> {
+  if (recurringTaskTickInProgress) return
+  recurringTaskTickInProgress = true
+
+  try {
+    const tasks = await listAllProjectRecurringTasks()
+    const now = Date.now()
+    for (const task of tasks) {
+      if (!task.enabled) continue
+      const nextRunAt = Date.parse(task.next_run_at)
+      if (!Number.isFinite(nextRunAt) || nextRunAt > now) continue
+      void executeRecurringTask(task)
+    }
+  } finally {
+    recurringTaskTickInProgress = false
+  }
+}
+
+function startRecurringTaskScheduler(): void {
+  setInterval(() => {
+    void tickRecurringTasks()
+  }, Math.max(5_000, RECURRING_TASK_TICK_MS))
+  void tickRecurringTasks()
+}
+
 function runFilePath(id: string): string {
   return path.join(PATHS.runs, `${safeFileKey(id)}.json`)
 }
@@ -870,6 +1471,764 @@ async function listRuns(query?: { agent?: string; project_id?: string; status?: 
     runs = runs.filter(run => run.status === query.status)
   }
   return runs.sort((a, b) => b.created_at.localeCompare(a.created_at))
+}
+
+async function getRunningAgentNames(): Promise<Set<string>> {
+  try {
+    const runningRuns = await listRuns({ status: 'running' })
+    const activeAgents = new Set<string>()
+    for (const run of runningRuns) {
+      if (run.agent) activeAgents.add(run.agent)
+      for (const involved of run.agents_involved ?? []) {
+        if (involved) activeAgents.add(involved)
+      }
+    }
+    return activeAgents
+  } catch {
+    return new Set<string>()
+  }
+}
+
+let sandboxReadyCache: { value: boolean; checkedAt: number } = {
+  value: false,
+  checkedAt: 0,
+}
+
+const OPENSHELL_CANDIDATES = [
+  process.env.OPENSHELL_BIN?.trim() || '',
+  path.join(os.homedir(), '.local', 'bin', 'openshell'),
+  '/opt/homebrew/bin/openshell',
+  '/usr/local/bin/openshell',
+  'openshell',
+].filter(Boolean)
+
+async function isSandboxReady(sandboxName: string): Promise<boolean> {
+  const now = Date.now()
+  if (now - sandboxReadyCache.checkedAt < 5000) {
+    return sandboxReadyCache.value
+  }
+
+  for (const binary of OPENSHELL_CANDIDATES) {
+    try {
+      const { stdout } = await execFileAsync(binary, ['sandbox', 'list'], {
+        timeout: 2500,
+        maxBuffer: 1024 * 1024,
+      })
+      const lower = stdout.toLowerCase()
+      const ready = lower.includes(sandboxName.toLowerCase()) && lower.includes('ready')
+      sandboxReadyCache = {
+        value: ready,
+        checkedAt: now,
+      }
+      return ready
+    } catch {
+      // Try next binary candidate.
+    }
+  }
+
+  sandboxReadyCache = {
+    value: false,
+    checkedAt: now,
+  }
+  return false
+}
+
+async function getAlwaysOnEntrypointAgents(agents: Agent[]): Promise<Set<string>> {
+  const tokenSet = Boolean((process.env.TELEGRAM_BOT_TOKEN ?? '').trim())
+  if (!tokenSet) return new Set<string>()
+
+  const envMap = await loadEnvLocalMap()
+  const sandboxName =
+    (envMap.get('NEMOCLAW_SANDBOX_NAME') ?? process.env.NEMOCLAW_SANDBOX_NAME ?? '').trim() || 'nemoclaw-base'
+  const ready = await isSandboxReady(sandboxName)
+  if (!ready) return new Set<string>()
+
+  return new Set(
+    agents
+      .filter(agent => agent.telegram_entrypoint)
+      .map(agent => agent.name)
+  )
+}
+
+async function resolveNemoclawSandboxName(): Promise<string> {
+  const envMap = await loadEnvLocalMap()
+  return (envMap.get('NEMOCLAW_SANDBOX_NAME') ?? process.env.NEMOCLAW_SANDBOX_NAME ?? '').trim() || 'nemoclaw-base'
+}
+
+async function runOpenShellWithCandidates(
+  args: string[],
+  options: { timeout?: number; maxBuffer?: number } = {}
+): Promise<void> {
+  const shellEscapeArg = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
+  const isMissingBinaryError = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+    if (message.includes('enoent')) return true
+    if (message.includes('command not found')) return true
+    if (message.includes('no such file or directory')) return true
+    return false
+  }
+
+  let lastError: Error | null = null
+  for (const binary of OPENSHELL_CANDIDATES) {
+    const command = [binary, ...args].map(shellEscapeArg).join(' ')
+    const detachedCommand = `${command} </dev/null`
+    try {
+      await execFileAsync('/bin/zsh', ['-lc', detachedCommand], {
+        timeout: options.timeout ?? 15_000,
+        maxBuffer: options.maxBuffer ?? 1024 * 1024 * 8,
+      })
+      return
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (!isMissingBinaryError(error)) break
+    }
+  }
+  if (lastError) throw lastError
+  throw new Error('No openshell binary available.')
+}
+
+async function runOpenShellCaptureWithCandidates(
+  args: string[],
+  options: { timeout?: number; maxBuffer?: number } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  const shellEscapeArg = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
+  const isMissingBinaryError = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+    if (message.includes('enoent')) return true
+    if (message.includes('command not found')) return true
+    if (message.includes('no such file or directory')) return true
+    return false
+  }
+
+  let lastError: Error | null = null
+  for (const binary of OPENSHELL_CANDIDATES) {
+    const command = [binary, ...args].map(shellEscapeArg).join(' ')
+    const detachedCommand = `${command} </dev/null`
+    try {
+      const output = await execFileAsync('/bin/zsh', ['-lc', detachedCommand], {
+        timeout: options.timeout ?? 15_000,
+        maxBuffer: options.maxBuffer ?? 1024 * 1024 * 8,
+      })
+      return {
+        stdout: String(output.stdout || ''),
+        stderr: String(output.stderr || ''),
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (!isMissingBinaryError(error)) break
+    }
+  }
+  if (lastError) throw lastError
+  throw new Error('No openshell binary available.')
+}
+
+function parseJsonFromCommandOutput<T>(raw: string): T | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  try {
+    return JSON.parse(trimmed) as T
+  } catch {
+    const objectStart = trimmed.indexOf('{')
+    const objectEnd = trimmed.lastIndexOf('}')
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      const objectCandidate = trimmed.slice(objectStart, objectEnd + 1)
+      try {
+        return JSON.parse(objectCandidate) as T
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+}
+
+function extractTranscriptText(content: unknown): string {
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+
+  const chunks: string[] = []
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue
+    const typed = item as { type?: unknown; text?: unknown }
+    if (typed.type === 'text' && typeof typed.text === 'string') {
+      const next = typed.text.trim()
+      if (next) chunks.push(next)
+    }
+  }
+  return chunks.join('\n\n').trim()
+}
+
+function extractTranscriptToolCalls(content: unknown): TranscriptToolCall[] {
+  if (!Array.isArray(content)) return []
+  const calls: TranscriptToolCall[] = []
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue
+    const typed = item as { type?: unknown; name?: unknown; arguments?: unknown }
+    if (typed.type !== 'toolCall') continue
+    if (typeof typed.name !== 'string') continue
+    const args = typed.arguments
+    calls.push({
+      name: typed.name,
+      arguments: args && typeof args === 'object' ? (args as Record<string, unknown>) : {},
+    })
+  }
+  return calls
+}
+
+function parseAgentFromSessionKey(sessionKey: string): string | null {
+  const match = sessionKey.match(/^agent:([^:]+)/i)
+  return match?.[1]?.trim() || null
+}
+
+function parseRuntimeSubagentEvent(raw: string): {
+  sessionKey: string
+  sessionId?: string
+  task: string
+  statusText: string
+  result: string
+  agent: string
+  success: boolean
+} | null {
+  if (!raw.includes('[Internal task completion event]')) return null
+  if (!raw.includes('<<<BEGIN_UNTRUSTED_CHILD_RESULT>>>')) return null
+
+  const sessionKeyMatch = raw.match(/session_key:\s*([^\n]+)/i)
+  const taskMatch = raw.match(/task:\s*([^\n]+)/i)
+  const statusMatch = raw.match(/status:\s*([^\n]+)/i)
+  const sessionIdMatch = raw.match(/session_id:\s*([^\n]+)/i)
+  const resultMatch = raw.match(/<<<BEGIN_UNTRUSTED_CHILD_RESULT>>>\n?([\s\S]*?)\n?<<<END_UNTRUSTED_CHILD_RESULT>>>/m)
+
+  const sessionKey = sessionKeyMatch?.[1]?.trim()
+  const task = taskMatch?.[1]?.trim()
+  const statusText = statusMatch?.[1]?.trim() ?? 'unknown'
+  const result = resultMatch?.[1]?.trim() ?? ''
+
+  if (!sessionKey || !task) return null
+
+  const agent = parseAgentFromSessionKey(sessionKey)
+  if (!agent) return null
+
+  return {
+    sessionKey,
+    sessionId: sessionIdMatch?.[1]?.trim() || undefined,
+    task,
+    statusText,
+    result,
+    agent,
+    success: !/failed|error/i.test(statusText),
+  }
+}
+
+function unwrapTelegramEnvelope(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+  if (trimmed.includes('[Internal task completion event]')) return ''
+
+  const envelopePattern =
+    /Conversation info \(untrusted metadata\):[\s\S]*?```[\s\S]*?```\s*Sender \(untrusted metadata\):[\s\S]*?```[\s\S]*?```\s*/m
+  const withoutEnvelope = trimmed.replace(envelopePattern, '').trim()
+  return withoutEnvelope || trimmed
+}
+
+function cleanAssistantTranscriptText(raw: string): string {
+  return raw.replace(/^\[\[reply_to_current\]\]\s*/i, '').trim()
+}
+
+function transcriptTimestamp(event: TranscriptEvent): string {
+  const ts = event.timestamp
+  if (typeof ts === 'string' && ts.trim()) return ts
+  return nowIso()
+}
+
+function inferDelegatedAgentFromToolCall(call: TranscriptToolCall): string | null {
+  if (call.name === 'sessions_spawn') {
+    const agentId = call.arguments.agentId
+    if (typeof agentId === 'string' && agentId.trim()) return agentId.trim()
+  }
+  if (call.name === 'sessions_send') {
+    const sessionKey = call.arguments.sessionKey
+    if (typeof sessionKey === 'string' && sessionKey.trim()) {
+      return parseAgentFromSessionKey(sessionKey)
+    }
+  }
+  return null
+}
+
+function inferDelegatedAgentFromToolResult(message: TranscriptMessageRecord): string | null {
+  if (!message?.toolName || (message.toolName !== 'sessions_spawn' && message.toolName !== 'sessions_send')) {
+    return null
+  }
+  const childSessionKey = message.details?.childSessionKey
+  if (typeof childSessionKey === 'string' && childSessionKey.trim()) {
+    const parsed = parseAgentFromSessionKey(childSessionKey)
+    if (parsed) return parsed
+  }
+  const sessionKey = message.details?.sessionKey
+  if (typeof sessionKey === 'string' && sessionKey.trim()) {
+    const parsed = parseAgentFromSessionKey(sessionKey)
+    if (parsed) return parsed
+  }
+  return null
+}
+
+function findPrimarySquadId(agentName: string, squads: Squad[]): string | undefined {
+  return squads.find(squad => squad.members.includes(agentName))?.id
+}
+
+function canonicalAgentName(name: string, byLowerName: Map<string, string>): string {
+  return byLowerName.get(name.toLowerCase()) ?? name.toLowerCase()
+}
+
+function resolveSessionAgentName(
+  session: OpenClawSessionSummary,
+  byLowerName: Map<string, string>,
+  telegramEntrypointName?: string
+): string {
+  const fromSession = session.agentId || parseAgentFromSessionKey(session.key) || 'main'
+  if (fromSession.toLowerCase() === 'main' && session.key.includes(':telegram:') && telegramEntrypointName) {
+    return telegramEntrypointName
+  }
+  return canonicalAgentName(fromSession, byLowerName)
+}
+
+function buildImportedStep(
+  timestamp: string,
+  label: string,
+  status: RunStep['status'],
+  type: NonNullable<RunStep['type']>,
+  extras: Partial<RunStep> = {}
+): RunStep {
+  return {
+    label,
+    status,
+    type,
+    timestamp,
+    title: extras.title ?? label,
+    description: extras.description,
+    agent: extras.agent,
+    skill: extras.skill,
+    started_at: extras.started_at ?? (status !== 'pending' ? timestamp : undefined),
+    completed_at: status === 'done' || status === 'error' ? timestamp : extras.completed_at,
+  }
+}
+
+function parseTranscriptEvents(raw: string): TranscriptEvent[] {
+  if (!raw.trim()) return []
+  const events: TranscriptEvent[] = []
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      events.push(JSON.parse(trimmed) as TranscriptEvent)
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+  return events
+}
+
+async function listOpenClawSessionsFromSandbox(sandboxName: string): Promise<OpenClawSessionSummary[]> {
+  const { stdout } = await runOpenShellCaptureWithCandidates(
+    [
+      'sandbox',
+      'exec',
+      '--name',
+      sandboxName,
+      '--',
+      'sh',
+      '-lc',
+      'NODE_NO_WARNINGS=1 openclaw sessions --json --all-agents',
+    ],
+    {
+      timeout: NEMOCLAW_RUN_SYNC_TIMEOUT_MS,
+    }
+  )
+  const parsed = parseJsonFromCommandOutput<OpenClawSessionsPayload>(stdout)
+  if (!parsed?.sessions || !Array.isArray(parsed.sessions)) return []
+  return parsed.sessions.filter(
+    session =>
+      typeof session?.key === 'string' &&
+      typeof session?.sessionId === 'string' &&
+      typeof session?.agentId === 'string'
+  )
+}
+
+async function readOpenClawSessionTranscript(
+  sandboxName: string,
+  session: OpenClawSessionSummary
+): Promise<string> {
+  const candidates = [
+    `/sandbox/.openclaw-data/agents/${session.agentId}/sessions/${session.sessionId}.jsonl`,
+    `/sandbox/.openclaw/agents/${session.agentId}/sessions/${session.sessionId}.jsonl`,
+  ]
+
+  for (const remotePath of candidates) {
+    try {
+      const { stdout } = await runOpenShellCaptureWithCandidates(
+        ['sandbox', 'exec', '--name', sandboxName, '--', 'cat', remotePath],
+        {
+          timeout: NEMOCLAW_RUN_SYNC_TIMEOUT_MS,
+          maxBuffer: 1024 * 1024 * 24,
+        }
+      )
+      if (stdout.trim()) return stdout
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return ''
+}
+
+let nemoclawRunsSyncInFlight: Promise<void> | null = null
+let nemoclawRunsLastSyncedAt = 0
+
+async function syncNemoclawRunsFromTranscripts(): Promise<void> {
+  const sandboxName = await resolveNemoclawSandboxName()
+  const ready = await isSandboxReady(sandboxName)
+  if (!ready) return
+
+  const [sessions, agents, squads] = await Promise.all([
+    listOpenClawSessionsFromSandbox(sandboxName),
+    listAgents(),
+    listSquads(),
+  ])
+  if (sessions.length === 0) return
+
+  const byLowerName = new Map(agents.map(agent => [agent.name.toLowerCase(), agent.name]))
+  const telegramEntrypointName = agents.find(agent => agent.telegram_entrypoint)?.name
+
+  const importedRuns = new Map<string, Run>()
+
+  for (const session of sessions) {
+    const transcriptRaw = await readOpenClawSessionTranscript(sandboxName, session)
+    if (!transcriptRaw.trim()) continue
+
+    const events = parseTranscriptEvents(transcriptRaw)
+    if (events.length === 0) continue
+
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index]
+      if (event.type !== 'message' || event.message?.role !== 'user') continue
+
+      const userText = extractTranscriptText(event.message.content)
+      if (!userText) continue
+
+      const runtimeCompletion = parseRuntimeSubagentEvent(userText)
+      if (runtimeCompletion) {
+        const childAgent = canonicalAgentName(runtimeCompletion.agent, byLowerName)
+        const parentAgent = resolveSessionAgentName(session, byLowerName, telegramEntrypointName)
+        const createdAt = transcriptTimestamp(event)
+        const runId = `run-ext-${hashId([
+          'subagent',
+          session.sessionId,
+          runtimeCompletion.sessionKey,
+          event.id ?? createdAt,
+        ])}`
+
+        importedRuns.set(runId, {
+          id: runId,
+          task: runtimeCompletion.task,
+          status: runtimeCompletion.success ? 'completed' : 'failed',
+          agent: childAgent,
+          agents_involved: [...new Set([parentAgent, childAgent])],
+          squad: findPrimarySquadId(childAgent, squads),
+          created_at: createdAt,
+          completed_at: createdAt,
+          duration_seconds: 0,
+          duration_ms: 0,
+          orchestrator_summary: `Imported delegated run from ${parentAgent} to ${childAgent}.`,
+          final_output: runtimeCompletion.result || runtimeCompletion.statusText,
+          steps: [
+            buildImportedStep(createdAt, 'Run imported', 'done', 'run_created', {
+              title: 'Run imported',
+              description: 'Imported from NemoClaw subagent completion event.',
+              agent: childAgent,
+            }),
+            buildImportedStep(createdAt, `Agent selected: ${childAgent}`, 'done', 'agent_selected', {
+              title: 'Agent selected',
+              description: 'Delegated subagent selected by orchestrator.',
+              agent: childAgent,
+            }),
+            buildImportedStep(
+              createdAt,
+              runtimeCompletion.success ? 'Run completed' : 'Run failed',
+              runtimeCompletion.success ? 'done' : 'error',
+              runtimeCompletion.success ? 'completed' : 'failed',
+              {
+                title: runtimeCompletion.success ? 'Completed' : 'Failed',
+                description: runtimeCompletion.statusText,
+                agent: childAgent,
+              }
+            ),
+          ],
+          artifacts: [],
+        })
+        continue
+      }
+
+      const task = unwrapTelegramEnvelope(userText)
+      if (!task) continue
+
+      let nextUserIndex = events.length
+      for (let pointer = index + 1; pointer < events.length; pointer += 1) {
+        if (events[pointer].type === 'message' && events[pointer].message?.role === 'user') {
+          nextUserIndex = pointer
+          break
+        }
+      }
+
+      const parentAgent = resolveSessionAgentName(session, byLowerName, telegramEntrypointName)
+      const involvedAgents = new Set<string>([parentAgent])
+      const createdAt = transcriptTimestamp(event)
+      let completedAt: string | undefined
+      let finalOutput = ''
+      let modelUsed = session.model ?? ''
+
+      for (let pointer = index + 1; pointer < nextUserIndex; pointer += 1) {
+        const candidate = events[pointer]
+        if (candidate.type !== 'message' || !candidate.message) continue
+
+        if (candidate.message.role === 'assistant') {
+          const text = cleanAssistantTranscriptText(extractTranscriptText(candidate.message.content))
+          if (text) {
+            finalOutput = text
+            completedAt = transcriptTimestamp(candidate)
+          }
+          if (typeof candidate.message.model === 'string' && candidate.message.model.trim()) {
+            modelUsed = candidate.message.model.trim()
+          }
+          for (const call of extractTranscriptToolCalls(candidate.message.content)) {
+            const delegated = inferDelegatedAgentFromToolCall(call)
+            if (delegated) involvedAgents.add(canonicalAgentName(delegated, byLowerName))
+          }
+        } else if (candidate.message.role === 'toolResult') {
+          const delegated = inferDelegatedAgentFromToolResult(candidate.message)
+          if (delegated) involvedAgents.add(canonicalAgentName(delegated, byLowerName))
+        }
+      }
+
+      const status: RunStatus = completedAt ? 'completed' : 'running'
+      const runId = `run-ext-${hashId(['session', session.sessionId, event.id ?? createdAt])}`
+      const involvedList = [...involvedAgents]
+      const delegatedOnly = involvedList.filter(name => name !== parentAgent)
+      const steps: RunStep[] = [
+        buildImportedStep(createdAt, 'Run imported', 'done', 'run_created', {
+          title: 'Run imported',
+          description: 'Imported from NemoClaw session transcript.',
+          agent: parentAgent,
+        }),
+        buildImportedStep(createdAt, `Agent selected: ${parentAgent}`, 'done', 'agent_selected', {
+          title: 'Agent selected',
+          description: 'Session owner selected as primary agent.',
+          agent: parentAgent,
+        }),
+      ]
+
+      for (const delegatedAgent of delegatedOnly) {
+        steps.push(
+          buildImportedStep(completedAt ?? createdAt, `Delegated: ${delegatedAgent}`, 'done', 'skill_invoked', {
+            title: 'Delegation',
+            description: `Delegated work to ${delegatedAgent}.`,
+            agent: delegatedAgent,
+            skill: 'sessions_spawn',
+          })
+        )
+      }
+
+      if (status === 'completed') {
+        steps.push(
+          buildImportedStep(completedAt ?? createdAt, 'Run completed', 'done', 'completed', {
+            title: 'Completed',
+            description: 'Imported run completed.',
+            agent: parentAgent,
+          })
+        )
+      }
+
+      importedRuns.set(runId, {
+        id: runId,
+        task,
+        status,
+        agent: parentAgent,
+        agents_involved: involvedList,
+        squad: findPrimarySquadId(parentAgent, squads),
+        created_at: createdAt,
+        completed_at: completedAt,
+        duration_seconds: completedAt ? 0 : undefined,
+        duration_ms: completedAt ? 0 : undefined,
+        orchestrator_summary: `Imported from NemoClaw session ${session.sessionId}${modelUsed ? ` using ${modelUsed}` : ''}.`,
+        final_output: finalOutput || undefined,
+        steps,
+        artifacts: [],
+      })
+    }
+  }
+
+  if (importedRuns.size === 0) return
+
+  await Promise.all(
+    [...importedRuns.values()].map(async run => {
+      await saveRun(run)
+    })
+  )
+}
+
+async function syncNemoclawRunsFromTranscriptsBestEffort(): Promise<void> {
+  const now = Date.now()
+  if (nemoclawRunsSyncInFlight) {
+    await nemoclawRunsSyncInFlight
+    return
+  }
+  if (now - nemoclawRunsLastSyncedAt < NEMOCLAW_RUN_SYNC_MIN_INTERVAL_MS) return
+
+  nemoclawRunsSyncInFlight = (async () => {
+    try {
+      await syncNemoclawRunsFromTranscripts()
+    } catch (error) {
+      console.warn('NemoClaw transcript run sync failed:', error instanceof Error ? error.message : String(error))
+    } finally {
+      nemoclawRunsLastSyncedAt = Date.now()
+      nemoclawRunsSyncInFlight = null
+    }
+  })()
+
+  await nemoclawRunsSyncInFlight
+}
+
+function buildRegistryMarkdown(agents: Agent[], squads: Squad[]): string {
+  const now = nowIso()
+  const memberships = new Map<string, string[]>()
+  for (const squad of squads) {
+    for (const member of squad.members) {
+      const current = memberships.get(member) ?? []
+      memberships.set(member, [...current, squad.id])
+    }
+  }
+
+  const lines: string[] = []
+  lines.push('# NanoSquad Registry')
+  lines.push('')
+  lines.push(`Generated: ${now}`)
+  lines.push('Source: nanosquad-app local YAML registry')
+  lines.push('')
+  lines.push('Use this file as the source of truth for:')
+  lines.push('- Which agents exist')
+  lines.push('- Which squads each agent belongs to')
+  lines.push('- Squad delegation mode, lead agent, Telegram contact agent')
+  lines.push('- Squad shared lore/documentation')
+  lines.push('')
+  lines.push('## Agents')
+  lines.push('')
+
+  for (const agent of [...agents].sort((a, b) => a.name.localeCompare(b.name))) {
+    const agentSquads = memberships.get(agent.name) ?? []
+    lines.push(`### ${agent.name}`)
+    lines.push(`- Role: ${agent.role || '(none)'}`)
+    lines.push(`- Model: ${agent.model || '(unset)'}`)
+    lines.push(`- Fallback model: ${agent.fallback_model || '(none)'}`)
+    lines.push(`- Global coordinator: ${agent.global_coordinator ? 'yes' : 'no'}`)
+    lines.push(`- Telegram entrypoint: ${agent.telegram_entrypoint ? 'yes' : 'no'}`)
+    lines.push(`- Squads: ${agentSquads.length ? agentSquads.join(', ') : '(none)'}`)
+    lines.push(`- Skills: ${agent.skills.length ? agent.skills.join(', ') : '(none)'}`)
+    lines.push(`- System prompt:`)
+    lines.push('```text')
+    lines.push(agent.system_prompt || '')
+    lines.push('```')
+    lines.push('')
+  }
+
+  lines.push('## Squads')
+  lines.push('')
+  for (const squad of [...squads].sort((a, b) => a.id.localeCompare(b.id))) {
+    lines.push(`### ${squad.id}`)
+    lines.push(`- Name: ${squad.name}`)
+    lines.push(`- Description: ${squad.description || '(none)'}`)
+    lines.push(`- Delegation mode: ${squad.delegation_mode}`)
+    lines.push(`- Delegation policy: ${squad.delegation_policy}`)
+    lines.push(`- Lead agent: ${squad.orchestrator || '(none)'}`)
+    lines.push(`- Telegram contact agent: ${squad.telegram_contact_agent || '(none)'}`)
+    lines.push(`- Members: ${squad.members.length ? squad.members.join(', ') : '(none)'}`)
+    lines.push('- Lore:')
+    lines.push('```markdown')
+    lines.push(squad.lore || '')
+    lines.push('```')
+    lines.push('')
+  }
+
+  return `${lines.join('\n').trim()}\n`
+}
+
+function upsertIdentityRegistryGuidance(current: string): string {
+  const guidance = [
+    IDENTITY_GUIDANCE_START,
+    '## Live Registry',
+    `For live agent/squad membership and squad lore, read \`${NEMOCLAW_REGISTRY_FILENAME}\` before answering org-structure questions.`,
+    IDENTITY_GUIDANCE_END,
+  ].join('\n')
+
+  const markerPattern = new RegExp(
+    `${IDENTITY_GUIDANCE_START}[\\s\\S]*?${IDENTITY_GUIDANCE_END}`,
+    'm'
+  )
+  if (markerPattern.test(current)) {
+    return current.replace(markerPattern, guidance)
+  }
+  return `${current.trimEnd()}\n\n${guidance}\n`
+}
+
+async function syncNemoclawWorkspaceContext(): Promise<void> {
+  const sandboxName = await resolveNemoclawSandboxName()
+  const ready = await isSandboxReady(sandboxName)
+  if (!ready) return
+
+  const [agents, squads] = await Promise.all([listAgents(), listSquads()])
+  const registry = buildRegistryMarkdown(agents, squads)
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nanosquad-registry-'))
+
+  try {
+    const localRegistryPath = path.join(tempDir, NEMOCLAW_REGISTRY_FILENAME)
+    await writeText(localRegistryPath, registry)
+    await runOpenShellWithCandidates([
+      'sandbox',
+      'upload',
+      sandboxName,
+      localRegistryPath,
+      `${NEMOCLAW_WORKSPACE_PATH}/${NEMOCLAW_REGISTRY_FILENAME}`,
+    ])
+
+    const localIdentityPath = path.join(tempDir, 'IDENTITY.md')
+    await runOpenShellWithCandidates([
+      'sandbox',
+      'download',
+      sandboxName,
+      `${NEMOCLAW_WORKSPACE_PATH}/IDENTITY.md`,
+      tempDir,
+    ])
+    const currentIdentity = await readText(localIdentityPath, '')
+    if (currentIdentity.trim()) {
+      const nextIdentity = upsertIdentityRegistryGuidance(currentIdentity)
+      if (nextIdentity !== currentIdentity) {
+        await writeText(localIdentityPath, nextIdentity)
+        await runOpenShellWithCandidates([
+          'sandbox',
+          'upload',
+          sandboxName,
+          localIdentityPath,
+          `${NEMOCLAW_WORKSPACE_PATH}/IDENTITY.md`,
+        ])
+      }
+    }
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true })
+  }
+}
+
+async function syncNemoclawWorkspaceContextBestEffort(): Promise<void> {
+  try {
+    await syncNemoclawWorkspaceContext()
+  } catch (error) {
+    console.warn('NemoClaw workspace registry sync failed:', error instanceof Error ? error.message : String(error))
+  }
 }
 
 async function getRun(id: string): Promise<Run | null> {
@@ -1086,8 +2445,17 @@ async function readAuditEntries(): Promise<AuditEntry[]> {
 }
 
 function chooseAgentForTask(task: string, agents: Agent[]): Agent {
+  if (agents.length === 0) {
+    throw new Error('No candidate agents available for this task.')
+  }
+
   const lower = task.toLowerCase()
   const byName = (name: string) => agents.find(agent => agent.name === name)
+  const globalCoordinator = agents.find(agent => agent.global_coordinator)
+
+  if (/project|manager|orchestrate|orchestration|delegate|delegation|coordinate|squad/.test(lower)) {
+    if (globalCoordinator) return globalCoordinator
+  }
 
   if (/code|script|typescript|javascript|bash|shell|debug|bug|refactor/.test(lower)) {
     return byName('coder') ?? agents[0]
@@ -1103,6 +2471,38 @@ function chooseDelegationPattern(task: string): Squad['delegation_policy'] {
   if (/compare|evaluate|best|pick|rank/.test(lower)) return 'vote'
   if (task.length > 240 || /multiple|parallel|several/.test(lower)) return 'parallel'
   return 'sequential'
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function chooseSkillForTask(task: string, availableSkills: string[]): string | undefined {
+  if (availableSkills.length === 0) return undefined
+  const lowerTask = task.toLowerCase()
+  const normalizedSkills = new Set(availableSkills.map(skill => skill.trim().toLowerCase()))
+
+  if (
+    normalizedSkills.has('web_search') &&
+    /\b(web|internet|online|browse|search|lookup|look up|latest|current|today|news|recent)\b/.test(lowerTask)
+  ) {
+    return availableSkills.find(skill => skill.trim().toLowerCase() === 'web_search')
+  }
+  if (normalizedSkills.has('code_exec') && /\b(code|script|terminal|shell|bash|python|node|debug|fix|compile|test)\b/.test(lowerTask)) {
+    return availableSkills.find(skill => skill.trim().toLowerCase() === 'code_exec')
+  }
+  if (normalizedSkills.has('summarize') && /\b(summary|summarize|digest|brief|tl;dr)\b/.test(lowerTask)) {
+    return availableSkills.find(skill => skill.trim().toLowerCase() === 'summarize')
+  }
+
+  for (const skill of availableSkills) {
+    const normalizedSkill = skill.trim().toLowerCase()
+    if (!normalizedSkill) continue
+    const skillPattern = new RegExp(`\\b${escapeRegex(normalizedSkill).replace(/_/g, '[_\\s-]?')}\\b`, 'i')
+    if (skillPattern.test(lowerTask)) return skill
+  }
+
+  return undefined
 }
 
 function step(
@@ -1126,10 +2526,105 @@ function step(
   }
 }
 
+function extractWebSearchQuery(task: string): string {
+  const firstLine = task
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .find(Boolean) ?? task.trim()
+
+  const cleaned = firstLine.replace(/^web[_\s-]?search[:\s-]*/i, '').trim()
+  const query = cleaned || firstLine || task
+  return query.slice(0, 400)
+}
+
+async function executeBraveWebSearchSkill(task: string): Promise<{ ok: boolean; output: string; message: string }> {
+  const apiKey = process.env.BRAVE_SEARCH_API_KEY?.trim()
+  if (!apiKey) {
+    return {
+      ok: false,
+      output: '',
+      message: 'BRAVE_SEARCH_API_KEY is not set; web_search could not use Brave.',
+    }
+  }
+
+  const query = extractWebSearchQuery(task)
+  if (!query) {
+    return {
+      ok: false,
+      output: '',
+      message: 'Could not derive a search query for web_search.',
+    }
+  }
+
+  try {
+    const url = new URL('https://api.search.brave.com/res/v1/web/search')
+    url.searchParams.set('q', query)
+    url.searchParams.set('count', '5')
+
+    const res = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        'X-Subscription-Token': apiKey,
+      },
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return {
+        ok: false,
+        output: '',
+        message: `Brave web search failed (${res.status}): ${text.slice(0, 200)}`,
+      }
+    }
+
+    const payload = (await res.json()) as {
+      web?: { results?: Array<{ title?: string; url?: string; description?: string }> }
+    }
+
+    const results = Array.isArray(payload.web?.results) ? payload.web.results : []
+    if (results.length === 0) {
+      return {
+        ok: true,
+        output: `Query: ${query}\nNo web results returned by Brave.`,
+        message: 'web_search executed via Brave Search API (no results).',
+      }
+    }
+
+    const lines: string[] = [`Query: ${query}`, '', 'Top Brave results:']
+    for (const [index, result] of results.slice(0, 5).entries()) {
+      const title = result.title?.trim() || '(untitled)'
+      const link = result.url?.trim() || '(no url)'
+      const snippet = result.description?.trim()
+      lines.push(`${index + 1}. ${title}`)
+      lines.push(`   URL: ${link}`)
+      if (snippet) lines.push(`   Snippet: ${snippet}`)
+      lines.push('')
+    }
+
+    return {
+      ok: true,
+      output: lines.join('\n').trim(),
+      message: 'web_search executed via Brave Search API.',
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error'
+    return {
+      ok: false,
+      output: '',
+      message: `Brave web search failed: ${message}`,
+    }
+  }
+}
+
 async function maybeExecuteNemoclawSkill(params: {
   skillName: string
   task: string
 }): Promise<{ ok: boolean; output: string; message: string }> {
+  const normalizedSkill = params.skillName.trim().toLowerCase()
+  if (normalizedSkill === 'web_search') {
+    return executeBraveWebSearchSkill(params.task)
+  }
+
   const cliPath = process.env.NEMOCLAW_CLI_PATH
   if (!cliPath) {
     return {
@@ -1163,6 +2658,101 @@ async function maybeExecuteNemoclawSkill(params: {
   }
 }
 
+function isLikelyLocalModel(model: string): boolean {
+  const lower = model.toLowerCase()
+  if (!model.includes('/')) return true
+  return lower.startsWith('ollama/') || lower.startsWith('local/')
+}
+
+function normalizeEndpoint(value: string): string {
+  return value.trim().replace(/\/+$/, '')
+}
+
+function endpointVariants(value: string): string[] {
+  const normalized = normalizeEndpoint(value)
+  if (!normalized) return []
+
+  const variants = new Set<string>([normalized])
+  try {
+    const parsed = new URL(normalized)
+    if (parsed.hostname === 'host.openshell.internal' || parsed.hostname === 'host.docker.internal') {
+      for (const host of ['localhost', '127.0.0.1']) {
+        const candidate = new URL(parsed.toString())
+        candidate.hostname = host
+        variants.add(normalizeEndpoint(candidate.toString()))
+      }
+    }
+  } catch {
+    // Keep original value only if URL parsing fails.
+  }
+  return [...variants]
+}
+
+async function resolveLocalInferenceEndpoints(): Promise<string[]> {
+  const candidates = new Set<string>()
+
+  const add = (value: string | undefined): void => {
+    if (!value?.trim()) return
+    for (const candidate of endpointVariants(value)) {
+      candidates.add(candidate)
+    }
+  }
+
+  add(process.env.NEMOCLAW_ENDPOINT_URL)
+
+  const onboard = await readJsonFile<{ endpointUrl?: string }>(ONBOARD_SESSION_PATH, {})
+  if (typeof onboard.endpointUrl === 'string') {
+    add(onboard.endpointUrl)
+  }
+
+  // Always include common local defaults as last-resort candidates.
+  add('http://localhost:11434/v1')
+  add('http://127.0.0.1:11434/v1')
+
+  return [...candidates]
+}
+
+async function listLocalModelsFromEndpoint(): Promise<Array<{
+  id: string
+  provider: string
+  description?: string
+  context?: number
+  context_window: number
+  input_price: number
+  output_price: number
+}>> {
+  const endpoints = await resolveLocalInferenceEndpoints()
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(`${endpoint}/models`)
+      if (!response.ok) continue
+
+      const data = (await response.json()) as {
+        data?: Array<{ id?: string; name?: string }>
+      }
+
+      const models = (data.data ?? [])
+        .map(item => item.id ?? item.name)
+        .filter((id): id is string => Boolean(id))
+        .map(id => ({
+          id,
+          provider: 'local',
+          description: 'Local model',
+          context: 8192,
+          context_window: 8192,
+          input_price: 0,
+          output_price: 0,
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+
+      if (models.length > 0) return models
+    } catch {
+      // Try next endpoint candidate.
+    }
+  }
+  return []
+}
+
 async function callModel(params: {
   model: string
   systemPrompt: string
@@ -1170,65 +2760,87 @@ async function callModel(params: {
   project?: Project | null
   squadLore?: string
 }): Promise<{ output: string; model_used: string; used_fallback: boolean }> {
-  const apiKey = process.env.OPENROUTER_API_KEY
-  if (!apiKey) {
-    const projectContext = params.project?.notes ? `\nProject notes: ${params.project.notes}` : ''
-    return {
-      output: `No OPENROUTER_API_KEY configured. Generated fallback response for task:\n\n${params.task}${projectContext}`,
-      model_used: params.model,
-      used_fallback: true,
-    }
-  }
-
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiKey}`,
-    'Content-Type': 'application/json',
-  }
-
-  if (process.env.OPENROUTER_HTTP_REFERER) headers['HTTP-Referer'] = process.env.OPENROUTER_HTTP_REFERER
-  if (process.env.OPENROUTER_X_TITLE) headers['X-Title'] = process.env.OPENROUTER_X_TITLE
-
   const contextChunks = [params.task]
   if (params.project?.notes) contextChunks.push(`Project context:\n${params.project.notes}`)
   if (params.squadLore) contextChunks.push(`Squad lore:\n${params.squadLore}`)
   const userContent = contextChunks.join('\n\n')
 
-  try {
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: params.model,
-        messages: [
-          { role: 'system', content: params.systemPrompt || 'You are a helpful assistant.' },
-          { role: 'user', content: userContent },
-        ],
-      }),
-    })
+  const messages = [
+    { role: 'system', content: params.systemPrompt || 'You are a helpful assistant.' },
+    { role: 'user', content: userContent },
+  ]
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new Error(`OpenRouter ${res.status}: ${text}`)
+  const localProvider = (process.env.NEMOCLAW_PROVIDER ?? '').toLowerCase()
+  const shouldTryLocal = isLikelyLocalModel(params.model) || localProvider === 'ollama-local'
+  if (shouldTryLocal) {
+    const endpoints = await resolveLocalInferenceEndpoints()
+    for (const endpoint of endpoints) {
+      try {
+        const localRes = await fetch(`${endpoint}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: params.model, messages }),
+        })
+        if (localRes.ok) {
+          const data = (await localRes.json()) as {
+            model?: string
+            choices?: Array<{ message?: { content?: string } }>
+          }
+          const output = data.choices?.[0]?.message?.content?.trim() || 'Model returned an empty response.'
+          return {
+            output,
+            model_used: data.model || params.model,
+            used_fallback: false,
+          }
+        }
+      } catch {
+        // Try next endpoint candidate.
+      }
+    }
+  }
+
+  const apiKey = process.env.OPENROUTER_API_KEY
+  if (apiKey) {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
     }
 
-    const data = (await res.json()) as {
-      model?: string
-      choices?: Array<{ message?: { content?: string } }>
-    }
-    const output = data.choices?.[0]?.message?.content?.trim() || 'Model returned an empty response.'
+    if (process.env.OPENROUTER_HTTP_REFERER) headers['HTTP-Referer'] = process.env.OPENROUTER_HTTP_REFERER
+    if (process.env.OPENROUTER_X_TITLE) headers['X-Title'] = process.env.OPENROUTER_X_TITLE
 
-    return {
-      output,
-      model_used: data.model || params.model,
-      used_fallback: false,
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: params.model,
+          messages,
+        }),
+      })
+
+      if (res.ok) {
+        const data = (await res.json()) as {
+          model?: string
+          choices?: Array<{ message?: { content?: string } }>
+        }
+        const output = data.choices?.[0]?.message?.content?.trim() || 'Model returned an empty response.'
+        return {
+          output,
+          model_used: data.model || params.model,
+          used_fallback: false,
+        }
+      }
+    } catch {
+      // Fall through to fallback below.
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error'
-    return {
-      output: `Model call failed; fallback response used.\n\nTask: ${params.task}\nError: ${message}`,
-      model_used: params.model,
-      used_fallback: true,
-    }
+  }
+
+  const projectContext = params.project?.notes ? `\nProject notes: ${params.project.notes}` : ''
+  return {
+    output: `Model call unavailable. Generated fallback response for task:\n\n${params.task}${projectContext}`,
+    model_used: params.model,
+    used_fallback: true,
   }
 }
 
@@ -1261,7 +2873,8 @@ async function listModelsFromProvider(): Promise<Array<{
 }>> {
   const provider = (process.env.MODEL_PROVIDER ?? 'openrouter').toLowerCase()
   if (provider !== 'openrouter') {
-    return MODEL_FALLBACK
+    const localModels = await listLocalModelsFromEndpoint()
+    return localModels.length > 0 ? localModels : MODEL_FALLBACK
   }
 
   const apiKey = process.env.OPENROUTER_API_KEY
@@ -1309,8 +2922,14 @@ async function listModelsFromProvider(): Promise<Array<{
       .filter((item): item is NonNullable<typeof item> => Boolean(item))
       .sort((a, b) => a.id.localeCompare(b.id))
 
-    return models.length > 0 ? models : MODEL_FALLBACK
+    const localModels = await listLocalModelsFromEndpoint()
+    const primary = models.length > 0 ? models : MODEL_FALLBACK
+    const seen = new Set(primary.map(item => item.id))
+    const merged = [...primary, ...localModels.filter(item => !seen.has(item.id))]
+    return merged
   } catch {
+    const localModels = await listLocalModelsFromEndpoint()
+    if (localModels.length > 0) return localModels
     return MODEL_FALLBACK
   }
 }
@@ -1320,6 +2939,7 @@ async function runTask(params: {
   preferredAgent?: string
   project_id?: string
   preferredSquadId?: string
+  task_context?: string
   stream?: (event: unknown) => Promise<void>
 }): Promise<Run> {
   const startedAt = Date.now()
@@ -1330,13 +2950,48 @@ async function runTask(params: {
 
   const settings = await readSettings()
   const project = params.project_id ? await getProject(params.project_id) : null
-  const selectedAgent =
-    (params.preferredAgent ? agents.find(agent => agent.name === params.preferredAgent) : undefined) ??
-    chooseAgentForTask(params.task, agents)
-
   const allSquads = await listSquads()
+  const requestedSquad = params.preferredSquadId
+    ? allSquads.find(squad => squad.id === params.preferredSquadId)
+    : undefined
+
+  const candidatePool = requestedSquad
+    ? agents.filter(agent => agent.global_coordinator || requestedSquad.members.includes(agent.name))
+    : agents
+
+  const explicitPreferredAgent = params.preferredAgent
+    ? agents.find(agent => agent.name === params.preferredAgent)
+    : undefined
+
+  let routingRationale = 'Dispatcher selected the agent based on task intent and squad membership.'
+
+  let selectedAgent = explicitPreferredAgent
+  if (!selectedAgent && requestedSquad?.orchestrator) {
+    const orchestrator = agents.find(agent => agent.name === requestedSquad.orchestrator)
+    if (orchestrator) {
+      selectedAgent = orchestrator
+      routingRationale = `Squad orchestrator ${orchestrator.name} selected as primary coordinator.`
+    }
+  }
+
+  if (!selectedAgent) {
+    selectedAgent = chooseAgentForTask(params.task, candidatePool)
+  }
+
+  if (requestedSquad && !selectedAgent.global_coordinator && !requestedSquad.members.includes(selectedAgent.name)) {
+    if (params.preferredAgent) {
+      throw new Error(`Agent "${selectedAgent.name}" is not a member of squad "${requestedSquad.name}".`)
+    }
+    const fallbackPool = agents.filter(agent => agent.global_coordinator || requestedSquad.members.includes(agent.name))
+    if (fallbackPool.length === 0) {
+      throw new Error(`No agents available for squad "${requestedSquad.name}".`)
+    }
+    selectedAgent = chooseAgentForTask(params.task, fallbackPool)
+    routingRationale = 'Fallback selection applied within squad scope.'
+  }
+
   const selectedSquad =
-    (params.preferredSquadId ? allSquads.find(squad => squad.id === params.preferredSquadId) : undefined) ??
+    requestedSquad ??
     allSquads.find(squad => squad.members.includes(selectedAgent.name))
 
   const runId = `run-${Date.now()}-${randomUUID().slice(0, 6)}`
@@ -1364,7 +3019,7 @@ async function runTask(params: {
   run.steps.push(
     step(`Agent selected: ${selectedAgent.name}`, 'done', 'agent_selected', {
       title: 'Agent selected',
-      description: 'Dispatcher selected the best agent for this task.',
+      description: routingRationale,
       agent: selectedAgent.name,
     })
   )
@@ -1398,22 +3053,31 @@ async function runTask(params: {
       squad: selectedSquad?.name,
       delegation_mode: selectedSquad?.delegation_mode ?? 'dynamic',
       delegation_decision: delegationDecision,
-      rationale: 'Dispatcher selected the agent based on task intent and squad membership.',
+      rationale:
+        selectedAgent.global_coordinator && selectedSquad && !selectedSquad.members.includes(selectedAgent.name)
+          ? 'Global coordinator selected for cross-squad orchestration.'
+          : routingRationale,
     })
   }
 
+  const effectiveTask = params.task_context ? `${params.task}\n\n${params.task_context}` : params.task
   let skillOutput = ''
-  const skillMatch = selectedAgent.skills.find(skill => params.task.toLowerCase().includes(skill.toLowerCase()))
+  let modelTask = effectiveTask
+  let modelSystemPrompt = selectedAgent.system_prompt
+  const skillMatch = chooseSkillForTask(effectiveTask, selectedAgent.skills)
   if (skillMatch) {
+    const isWebSearchSkill = skillMatch.trim().toLowerCase() === 'web_search'
     run.steps.push(
       step(`Skill invoked: ${skillMatch}`, 'running', 'skill_invoked', {
         title: 'Skill invoked',
-        description: `Invoking ${skillMatch} through NemoClaw CLI.`,
+        description: isWebSearchSkill
+          ? `Invoking ${skillMatch} through Brave Search API.`
+          : `Invoking ${skillMatch} through NemoClaw CLI.`,
         agent: selectedAgent.name,
         skill: skillMatch,
       })
     )
-    const skillResult = await maybeExecuteNemoclawSkill({ skillName: skillMatch, task: params.task })
+    const skillResult = await maybeExecuteNemoclawSkill({ skillName: skillMatch, task: effectiveTask })
     run.steps[run.steps.length - 1] = {
       ...run.steps[run.steps.length - 1],
       status: skillResult.ok ? 'done' : 'error',
@@ -1422,7 +3086,22 @@ async function runTask(params: {
     }
 
     if (skillResult.ok && skillResult.output.trim()) {
-      skillOutput = `\n\nSkill output (${skillMatch}):\n${skillResult.output.trim()}`
+      skillOutput = `Skill output (${skillMatch}):\n${skillResult.output.trim()}`
+      modelTask = [
+        effectiveTask,
+        'Tool result available from skill execution:',
+        skillOutput,
+        'Use the tool result above as factual context when answering.',
+      ].join('\n\n')
+      if (isWebSearchSkill) {
+        modelSystemPrompt = [
+          selectedAgent.system_prompt,
+          'When web_search tool results are provided, rely on them.',
+          'Do not claim you cannot access the web if tool results are present in the prompt.',
+        ]
+          .filter(Boolean)
+          .join('\n\n')
+      }
     } else if (!skillResult.ok) {
       run.steps.push(
         step('Skill fallback applied', 'done', 'fallback', {
@@ -1445,8 +3124,8 @@ async function runTask(params: {
 
   const modelResult = await callModel({
     model: selectedAgent.model || settings.default_model,
-    systemPrompt: selectedAgent.system_prompt,
-    task: params.task,
+    systemPrompt: modelSystemPrompt,
+    task: modelTask,
     project,
     squadLore: selectedSquad?.lore,
   })
@@ -1460,7 +3139,7 @@ async function runTask(params: {
       : 'Model response received.',
   }
 
-  const finalOutput = `${modelResult.output}${skillOutput}`.trim()
+  const finalOutput = [modelResult.output.trim(), skillOutput].filter(Boolean).join('\n\n').trim()
 
   if (params.stream) {
     const chunks = finalOutput.match(/\S+\s*/g) ?? [finalOutput]
@@ -1536,37 +3215,33 @@ async function buildEnvPayload(): Promise<Array<{
   description: string
   required: boolean
   is_set: boolean
-  masked_value?: string
+  value?: string
 }>> {
   const envMap = await loadEnvLocalMap()
-  const payload = ENV_SCHEMA.map(item => {
-    const value = process.env[item.key] ?? envMap.get(item.key)
-    return {
-      service: item.service,
-      key: item.key,
-      label: item.label,
-      description: item.description,
-      required: item.required,
-      is_set: Boolean(value),
-      masked_value: value ? maskValue(value) : undefined,
-    }
-  })
+  const payload: Array<{
+    service: string
+    key: string
+    label: string
+    description: string
+    required: boolean
+    is_set: boolean
+    value?: string
+  }> = []
 
-  const known = new Set(ENV_SCHEMA.map(item => item.key))
   for (const [key, value] of envMap.entries()) {
-    if (known.has(key)) continue
+    const meta = ENV_SCHEMA.find(item => item.key === key)
     payload.push({
-      service: 'general',
+      service: meta?.service ?? 'general',
       key,
-      label: key,
-      description: 'Custom environment variable',
-      required: false,
+      label: meta?.label ?? key,
+      description: meta?.description ?? 'Custom environment variable',
+      required: meta?.required ?? false,
       is_set: Boolean(value),
-      masked_value: value ? maskValue(value) : undefined,
+      value: value || undefined,
     })
   }
 
-  return payload.sort((a, b) => a.service.localeCompare(b.service) || a.key.localeCompare(b.key))
+  return payload
 }
 
 async function putEnvVar(payload: { key: string; value: string; sync_zshrc?: boolean }): Promise<{
@@ -1576,7 +3251,7 @@ async function putEnvVar(payload: { key: string; value: string; sync_zshrc?: boo
   description: string
   required: boolean
   is_set: boolean
-  masked_value?: string
+  value?: string
 }> {
   const key = payload.key.trim()
   if (!/^[A-Z0-9_]+$/.test(key)) {
@@ -1584,13 +3259,10 @@ async function putEnvVar(payload: { key: string; value: string; sync_zshrc?: boo
   }
 
   const envMap = await loadEnvLocalMap()
-  if (payload.value === '') {
-    envMap.delete(key)
-    delete process.env[key]
-  } else {
-    envMap.set(key, payload.value)
-    process.env[key] = payload.value
-  }
+  // Keep keys present in env.local even when cleared, so the UI can still
+  // display them as "not set" if the line exists in the file.
+  envMap.set(key, payload.value)
+  process.env[key] = payload.value
 
   await writeEnvLocalMap(envMap)
 
@@ -1599,7 +3271,7 @@ async function putEnvVar(payload: { key: string; value: string; sync_zshrc?: boo
   }
 
   const meta = ENV_SCHEMA.find(item => item.key === key)
-  const value = process.env[key] ?? envMap.get(key)
+  const value = envMap.get(key) ?? process.env[key]
 
   return {
     service: meta?.service ?? 'general',
@@ -1608,7 +3280,7 @@ async function putEnvVar(payload: { key: string; value: string; sync_zshrc?: boo
     description: meta?.description ?? 'Custom environment variable',
     required: meta?.required ?? false,
     is_set: Boolean(value),
-    masked_value: value ? maskValue(value) : undefined,
+    value: value || undefined,
   }
 }
 
@@ -1722,6 +3394,8 @@ async function bootstrap(): Promise<void> {
   await ensureBaseStructure()
   await seedDefaults()
   await hydrateProcessEnvFromLocal()
+  await syncNemoclawWorkspaceContextBestEffort()
+  console.log(`Managed env file: ${ENV_LOCAL_PATH}`)
 
   const app = express()
   app.use(cors())
@@ -1752,8 +3426,14 @@ async function bootstrap(): Promise<void> {
   app.get('/agents', async (_req, res) => {
     const squads = await listSquads()
     const agents = await listAgents()
+    const runningAgents = await getRunningAgentNames()
+    const alwaysOnAgents = await getAlwaysOnEntrypointAgents(agents)
     const enriched = agents.map(agent => ({
       ...agent,
+      status:
+        agent.status === 'running' || runningAgents.has(agent.name) || alwaysOnAgents.has(agent.name)
+          ? 'running'
+          : 'idle',
       squad_id: squads.find(squad => squad.members.includes(agent.name))?.id,
     }))
     res.json(enriched)
@@ -1763,8 +3443,17 @@ async function bootstrap(): Promise<void> {
     try {
       const agent = await getAgent(req.params.name)
       if (!agent) return res.status(404).send('Agent not found')
+      const runningAgents = await getRunningAgentNames()
+      const alwaysOnAgents = await getAlwaysOnEntrypointAgents([agent])
       const squad = (await listSquads()).find(item => item.members.includes(agent.name))
-      res.json({ ...agent, squad_id: squad?.id })
+      res.json({
+        ...agent,
+        status:
+          agent.status === 'running' || runningAgents.has(agent.name) || alwaysOnAgents.has(agent.name)
+            ? 'running'
+            : 'idle',
+        squad_id: squad?.id,
+      })
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Invalid agent name')
     }
@@ -1773,6 +3462,7 @@ async function bootstrap(): Promise<void> {
   app.put('/agents/:name', async (req, res) => {
     try {
       const agent = await putAgent(req.params.name, req.body as Partial<Agent>)
+      await syncNemoclawWorkspaceContextBestEffort()
       res.json(agent)
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Failed to save agent')
@@ -1782,6 +3472,7 @@ async function bootstrap(): Promise<void> {
   app.delete('/agents/:name', async (req, res) => {
     try {
       await deleteAgent(req.params.name)
+      await syncNemoclawWorkspaceContextBestEffort()
       res.json({ ok: true })
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Failed to delete agent')
@@ -1818,6 +3509,7 @@ async function bootstrap(): Promise<void> {
     try {
       await runTask({
         task,
+        preferredAgent: typeof req.body?.agent === 'string' ? req.body.agent : undefined,
         project_id: req.body?.project_id,
         preferredSquadId: req.body?.squad_id,
         stream: async event => {
@@ -1885,6 +3577,7 @@ async function bootstrap(): Promise<void> {
         delegation_mode: body.delegation_mode ?? mapPolicyToMode(body.delegation_policy ?? 'dynamic'),
         created_at: nowIso(),
       })
+      await syncNemoclawWorkspaceContextBestEffort()
       res.json(squad)
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Failed to create squad')
@@ -1894,6 +3587,7 @@ async function bootstrap(): Promise<void> {
   app.put('/squads/:id', async (req, res) => {
     try {
       const squad = await putSquad(req.params.id, req.body as Partial<Squad>)
+      await syncNemoclawWorkspaceContextBestEffort()
       res.json(squad)
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Failed to save squad')
@@ -1902,6 +3596,7 @@ async function bootstrap(): Promise<void> {
 
   app.delete('/squads/:id', async (req, res) => {
     await deleteSquad(req.params.id)
+    await syncNemoclawWorkspaceContextBestEffort()
     res.json({ ok: true })
   })
 
@@ -1942,7 +3637,64 @@ async function bootstrap(): Promise<void> {
     res.json({ ok: true })
   })
 
+  app.get('/projects/:id/recurring-tasks', async (req, res) => {
+    const project = await getProject(req.params.id)
+    if (!project) return res.status(404).send('Project not found')
+    res.json(await listProjectRecurringTasks(project.id))
+  })
+
+  app.post('/projects/:id/recurring-tasks', async (req, res) => {
+    try {
+      const project = await getProject(req.params.id)
+      if (!project) return res.status(404).send('Project not found')
+      const recurringTask = await createProjectRecurringTask(project.id, req.body as Partial<RecurringTask>)
+      res.json(recurringTask)
+    } catch (error) {
+      res.status(400).send(error instanceof Error ? error.message : 'Failed to create recurring task')
+    }
+  })
+
+  app.put('/projects/:id/recurring-tasks/:taskId', async (req, res) => {
+    try {
+      const project = await getProject(req.params.id)
+      if (!project) return res.status(404).send('Project not found')
+      const recurringTask = await updateProjectRecurringTask(
+        project.id,
+        req.params.taskId,
+        req.body as Partial<RecurringTask>
+      )
+      res.json(recurringTask)
+    } catch (error) {
+      res.status(400).send(error instanceof Error ? error.message : 'Failed to update recurring task')
+    }
+  })
+
+  app.delete('/projects/:id/recurring-tasks/:taskId', async (req, res) => {
+    try {
+      const project = await getProject(req.params.id)
+      if (!project) return res.status(404).send('Project not found')
+      await deleteProjectRecurringTask(project.id, req.params.taskId)
+      res.json({ ok: true })
+    } catch (error) {
+      res.status(400).send(error instanceof Error ? error.message : 'Failed to delete recurring task')
+    }
+  })
+
+  app.post('/projects/:id/recurring-tasks/:taskId/run-now', async (req, res) => {
+    try {
+      const project = await getProject(req.params.id)
+      if (!project) return res.status(404).send('Project not found')
+      const recurringTask = (await listProjectRecurringTasks(project.id)).find(task => task.id === req.params.taskId)
+      if (!recurringTask) return res.status(404).send('Recurring task not found')
+      await executeRecurringTask(recurringTask)
+      res.json({ ok: true })
+    } catch (error) {
+      res.status(400).send(error instanceof Error ? error.message : 'Failed to execute recurring task')
+    }
+  })
+
   app.get('/runs', async (req, res) => {
+    await syncNemoclawRunsFromTranscriptsBestEffort()
     const runs = await listRuns({
       agent: typeof req.query.agent === 'string' ? req.query.agent : undefined,
       project_id: typeof req.query.project_id === 'string' ? req.query.project_id : undefined,
@@ -1952,6 +3704,7 @@ async function bootstrap(): Promise<void> {
   })
 
   app.get('/runs/:id', async (req, res) => {
+    await syncNemoclawRunsFromTranscriptsBestEffort()
     const run = await getRun(req.params.id)
     if (!run) return res.status(404).send('Run not found')
     res.json(run)
@@ -2064,6 +3817,8 @@ async function bootstrap(): Promise<void> {
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(500).send(err.message || 'Internal server error')
   })
+
+  startRecurringTaskScheduler()
 
   const port = Number(process.env.BACKEND_PORT ?? 8000)
   app.listen(port, () => {

@@ -22,9 +22,12 @@ cp .env.example .env
 
 2. Configure runtime env using the app (Settings -> Environment), or edit:
 
-- `config/env.local`
+- `~/.nemoclaw/config/env.local`
 
-Do not commit `config/env.local`.
+Optional override path:
+- set `AGENTPLATFORM_ENV_LOCAL_PATH` in `.env`
+
+Do not commit your real env file.
 
 ## 3. Run Locally
 

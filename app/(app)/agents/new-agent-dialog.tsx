@@ -22,9 +22,19 @@ interface NewAgentDialogProps {
   squads: Squad[]
   onCreated: (agent: Agent) => void
   onSquadsChanged: (squads: Squad[]) => void
+  initialSquadId?: string
+  lockSquad?: boolean
 }
 
-export function NewAgentDialog({ open, onOpenChange, squads, onCreated, onSquadsChanged }: NewAgentDialogProps) {
+export function NewAgentDialog({
+  open,
+  onOpenChange,
+  squads,
+  onCreated,
+  onSquadsChanged,
+  initialSquadId,
+  lockSquad = false,
+}: NewAgentDialogProps) {
   const { toast } = useToast()
   const [loading, setLoading] = useState(false)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
@@ -44,8 +54,21 @@ export function NewAgentDialog({ open, onOpenChange, squads, onCreated, onSquads
 
   useEffect(() => {
     if (!open) return
+    const hasInitial = Boolean(initialSquadId && squads.some(s => s.id === initialSquadId))
+    if (lockSquad && hasInitial) {
+      setSelectedSquadId(initialSquadId as string)
+      return
+    }
+    if (!lockSquad && hasInitial) {
+      setSelectedSquadId(initialSquadId as string)
+      return
+    }
+    if (lockSquad) {
+      setSelectedSquadId(squads[0]?.id ?? '')
+      return
+    }
     setSelectedSquadId(squads.length > 0 ? squads[0].id : NEW_SQUAD_ID)
-  }, [open, squads])
+  }, [open, squads, initialSquadId, lockSquad])
 
   const existingSquad = useMemo(
     () => squads.find(s => s.id === selectedSquadId),
@@ -64,7 +87,7 @@ export function NewAgentDialog({ open, onOpenChange, squads, onCreated, onSquads
     else if (!/^[a-z0-9_-]+$/.test(form.name)) e.name = 'Use lowercase letters, numbers, _ or -'
     if (!form.role.trim()) e.role = 'Role is required'
     if (!selectedSquadId) e.squad = 'Select a squad'
-    if (selectedSquadId === NEW_SQUAD_ID) {
+    if (!lockSquad && selectedSquadId === NEW_SQUAD_ID) {
       if (!newSquad.name.trim()) e.new_squad_name = 'New squad name is required'
     }
     setErrors(e)
@@ -87,7 +110,7 @@ export function NewAgentDialog({ open, onOpenChange, squads, onCreated, onSquads
       await putAgent(agent.name, agent)
 
       let targetSquad: Squad | null = existingSquad ?? null
-      if (selectedSquadId === NEW_SQUAD_ID) {
+      if (!lockSquad && selectedSquadId === NEW_SQUAD_ID) {
         targetSquad = await createSquad({
           name: newSquad.name.trim(),
           description: newSquad.description.trim(),
@@ -107,6 +130,8 @@ export function NewAgentDialog({ open, onOpenChange, squads, onCreated, onSquads
         const updated = await putSquad(targetSquad.id, { members })
         onSquadsChanged(squads.map(s => (s.id === updated.id ? updated : s)))
         targetSquad = updated
+      } else if (lockSquad && !targetSquad) {
+        throw new Error('Target squad not found.')
       }
 
       onCreated({ ...agent, squad_id: targetSquad?.id })
@@ -167,25 +192,36 @@ export function NewAgentDialog({ open, onOpenChange, squads, onCreated, onSquads
               </button>
             </div>
 
-            <div className="space-y-1.5">
-              <Label>Squad</Label>
-              <Select value={selectedSquadId} onValueChange={setSelectedSquadId}>
-                <SelectTrigger className="text-sm">
-                  <SelectValue placeholder="Select squad" />
-                </SelectTrigger>
-                <SelectContent>
-                  {squads.map(squad => (
-                    <SelectItem key={squad.id} value={squad.id} className="text-sm">
-                      {squad.name}
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={NEW_SQUAD_ID} className="text-sm">Create new squad</SelectItem>
-                </SelectContent>
-              </Select>
-              {errors.squad && <p className="text-xs text-destructive-foreground">{errors.squad}</p>}
-            </div>
+            {lockSquad ? (
+              <div className="space-y-1.5">
+                <Label>Squad</Label>
+                <Input
+                  value={existingSquad?.name ?? 'Current squad'}
+                  disabled
+                  className="text-sm"
+                />
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label>Squad</Label>
+                <Select value={selectedSquadId} onValueChange={setSelectedSquadId}>
+                  <SelectTrigger className="text-sm">
+                    <SelectValue placeholder="Select squad" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {squads.map(squad => (
+                      <SelectItem key={squad.id} value={squad.id} className="text-sm">
+                        {squad.name}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value={NEW_SQUAD_ID} className="text-sm">Create new squad</SelectItem>
+                  </SelectContent>
+                </Select>
+                {errors.squad && <p className="text-xs text-destructive-foreground">{errors.squad}</p>}
+              </div>
+            )}
 
-            {selectedSquadId === NEW_SQUAD_ID && (
+            {!lockSquad && selectedSquadId === NEW_SQUAD_ID && (
               <div className="rounded-md border border-border p-3 space-y-3">
                 <p className="text-xs text-muted-foreground">Create and assign new squad</p>
                 <div className="space-y-1.5">

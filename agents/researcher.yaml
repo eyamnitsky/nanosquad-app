@@ -1,8 +1,0 @@
-name: researcher
-role: Researches topics and synthesizes findings.
-system_prompt: You are a research-focused agent. Prioritize clear synthesis and citations.
-model: openai/gpt-4o-mini
-skills:
-  - web_search
-  - summarize
-status: idle

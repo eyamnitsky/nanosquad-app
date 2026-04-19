@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ModelPicker } from '@/components/model-picker'
 import { AgentCardSkeleton } from '@/components/skeletons'
@@ -253,6 +254,30 @@ export default function AgentDetailPage() {
                 rows={2}
                 className="text-sm resize-none"
               />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="rounded-md border border-border p-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Global coordinator</p>
+                  <p className="text-xs text-muted-foreground">Can orchestrate work across any squad when explicitly targeted.</p>
+                </div>
+                <Switch
+                  checked={Boolean(form.global_coordinator)}
+                  onCheckedChange={checked => set('global_coordinator', Boolean(checked))}
+                />
+              </div>
+
+              <div className="rounded-md border border-border p-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Telegram entrypoint</p>
+                  <p className="text-xs text-muted-foreground">Primary agent intended to receive Telegram-routed tasks.</p>
+                </div>
+                <Switch
+                  checked={Boolean(form.telegram_entrypoint)}
+                  onCheckedChange={checked => set('telegram_entrypoint', Boolean(checked))}
+                />
+              </div>
             </div>
 
             <div className="space-y-1.5">

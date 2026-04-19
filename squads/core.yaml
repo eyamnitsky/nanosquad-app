@@ -1,5 +1,7 @@
+id: core
 name: core
 description: Default cross-functional squad
+lore: ""
 members:
   - researcher
   - coder

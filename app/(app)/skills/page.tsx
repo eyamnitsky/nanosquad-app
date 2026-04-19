@@ -14,12 +14,9 @@ import {
 import { getSkills, createSkill, deleteSkill, type Skill } from '@/lib/api'
 import { useToast } from '@/hooks/use-toast'
 
-const SKILL_SCAFFOLD = `name: my_skill
-description: Briefly describe what this skill does.
-input:
-  task: string
-output:
-  result: string
+const SKILL_SCAFFOLD = `# Skill metadata / notes
+# This text is stored with the skill record.
+# Runtime implementation should exist in NemoClaw tools/plugins.
 `
 
 function SkillRow({
@@ -123,7 +120,7 @@ export default function SkillsPage() {
       setSkills(prev => prev ? [...prev, created] : [created])
       setModalOpen(false)
       setForm({ name: '', description: '', code: SKILL_SCAFFOLD })
-      toast({ title: 'Skill created' })
+      toast({ title: 'Skill registered' })
     } finally {
       setSaving(false)
     }
@@ -146,7 +143,7 @@ export default function SkillsPage() {
         </div>
         <Button size="sm" onClick={() => setModalOpen(true)} className="gap-2">
           <Plus className="h-4 w-4" />
-          New Skill
+          Register Skill
         </Button>
       </div>
 
@@ -164,11 +161,11 @@ export default function SkillsPage() {
           <Wrench className="h-10 w-10 text-muted-foreground/40 mb-4" />
           <h2 className="text-base font-medium text-foreground mb-1">No skills yet</h2>
           <p className="text-sm text-muted-foreground max-w-sm mb-6">
-            Skills are callable functions that agents can invoke. Create your first skill to extend what your agents can do.
+            Skills listed here are registrations that agents can reference. Runtime tool implementation is handled in NemoClaw.
           </p>
           <Button size="sm" onClick={() => setModalOpen(true)} className="gap-2">
             <Plus className="h-4 w-4" />
-            New Skill
+            Register Skill
           </Button>
         </div>
       ) : (
@@ -179,14 +176,19 @@ export default function SkillsPage() {
         </div>
       )}
 
-      {/* New Skill Modal */}
+      {/* Register Skill Modal */}
       <Dialog open={modalOpen} onOpenChange={setModalOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>New Skill</DialogTitle>
+            <DialogTitle>Register Skill</DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
+            <div className="rounded-md border border-border bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">
+              This registers a skill record in NanoSquad. If the skill requires executable logic (for example Python scripts),
+              that implementation must exist in NemoClaw runtime tooling.
+            </div>
+
             <div className="space-y-1.5">
               <Label htmlFor="sk-name">Name</Label>
               <Input
@@ -212,7 +214,7 @@ export default function SkillsPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="sk-code">Implementation</Label>
+              <Label htmlFor="sk-code">Implementation Notes / Spec</Label>
               <Textarea
                 id="sk-code"
                 value={form.code}
@@ -227,7 +229,7 @@ export default function SkillsPage() {
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setModalOpen(false)}>Cancel</Button>
             <Button size="sm" onClick={handleCreate} disabled={saving}>
-              {saving ? 'Creating...' : 'Create Skill'}
+              {saving ? 'Registering...' : 'Register Skill'}
             </Button>
           </DialogFooter>
         </DialogContent>

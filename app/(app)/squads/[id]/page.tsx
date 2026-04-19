@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
-  ChevronLeft, Save, Trash2, Shield, ArrowRight, ArrowDown, Users, MessageCircle,
+  ChevronLeft, ChevronDown, ChevronUp, Save, Trash2, Shield, ArrowRight, ArrowDown, MessageCircle, Plus,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -18,12 +18,12 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { getSquad, putSquad, deleteSquad, getAgents, getRuns, type Squad, type Agent, type Run } from '@/lib/api'
 import { RunStatusBadge } from '@/components/run-status-badge'
 import { formatDistanceToNow } from '@/lib/time'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import { NewAgentDialog } from '../../agents/new-agent-dialog'
 
 const PALETTE = [
   '#3b7ff5', '#22c55e', '#f59e0b', '#ef4444',
@@ -168,8 +168,11 @@ export default function SquadDetailPage() {
   const [allAgents, setAllAgents] = useState<Agent[]>([])
   const [runs, setRuns] = useState<Run[] | null>(null)
   const [saving, setSaving] = useState(false)
+  const [loreExpanded, setLoreExpanded] = useState(false)
+  const [newAgentOpen, setNewAgentOpen] = useState(false)
 
   useEffect(() => {
+    setLoreExpanded(false)
     getSquad(id)
       .then(s => {
         setSquad(s)
@@ -239,7 +242,9 @@ export default function SquadDetailPage() {
     )
   }
 
-  const memberAgents = allAgents.filter(a => effectiveMembers.includes(a.name))
+  const memberAgents = effectiveMembers
+    .map(member => allAgents.find(agent => agent.name === member))
+    .filter((agent): agent is Agent => Boolean(agent))
   const squadColor = form.color ?? squad.color
 
   return (
@@ -289,6 +294,52 @@ export default function SquadDetailPage() {
         </div>
       </div>
 
+      {/* Agents (top) */}
+      <div className="mb-8 rounded-lg border border-border bg-card p-5">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium text-foreground">Agents</h2>
+            <p className="text-xs text-muted-foreground">
+              Members in this squad. Add new agents directly here.
+            </p>
+          </div>
+          <Button size="sm" onClick={() => setNewAgentOpen(true)} className="gap-1.5">
+            <Plus className="h-3.5 w-3.5" />
+            Add agent
+          </Button>
+        </div>
+
+        {memberAgents.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-2">No members yet. Add the first agent to this squad.</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {memberAgents.map(agent => (
+              <Link
+                key={agent.name}
+                href={`/agents/${encodeURIComponent(agent.name)}`}
+                className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 hover:border-brand/40 transition-colors"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {agent.name === form.orchestrator && (
+                    <Shield className="h-3.5 w-3.5 shrink-0" style={{ color: squadColor }} />
+                  )}
+                  <div className="min-w-0">
+                    <p className="font-mono text-sm text-foreground truncate">{agent.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">{agent.role}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  {agent.status === 'running' && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-status-running animate-pulse" />
+                  )}
+                  <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Left: config */}
         <div className="lg:col-span-2 space-y-5">
@@ -335,12 +386,29 @@ export default function SquadDetailPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Shared lore</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label>Shared lore</Label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setLoreExpanded(v => !v)}
+                  className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  {loreExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                  {loreExpanded ? 'Collapse to 10 lines' : 'Expand to 50 lines'}
+                </Button>
+              </div>
               <Textarea
                 value={form.lore ?? ''}
                 onChange={e => set('lore', e.target.value)}
-                rows={4}
-                className="text-sm resize-none"
+                rows={loreExpanded ? 50 : 10}
+                className="text-sm resize-none overflow-y-auto"
+                style={{
+                  height: loreExpanded ? '56rem' : '14rem',
+                  minHeight: loreExpanded ? '56rem' : '14rem',
+                  maxHeight: loreExpanded ? '56rem' : '14rem',
+                }}
                 placeholder="Shared context/instructions for all squad agents..."
               />
             </div>
@@ -495,83 +563,64 @@ export default function SquadDetailPage() {
         </div>
       </div>
 
-      {/* Runs tab */}
       <div className="mt-8">
-        <Tabs defaultValue="runs">
-          <TabsList className="h-8">
-            <TabsTrigger value="runs" className="text-xs">
-              Recent Runs {runs ? `(${runs.length})` : ''}
-            </TabsTrigger>
-            <TabsTrigger value="agents" className="text-xs">
-              Agents ({effectiveMembers.length})
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="runs" className="mt-4">
-            {runs === null ? (
-              <div className="space-y-2">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <div key={i} className="h-12 animate-pulse rounded-md bg-muted" />
-                ))}
-              </div>
-            ) : runs.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-4">No runs involving this squad yet.</p>
-            ) : (
-              <div className="rounded-lg border border-border overflow-hidden">
-                {runs.map((run, i) => (
-                  <Link
-                    key={run.id}
-                    href={`/runs/${run.id}`}
-                    className={cn(
-                      'flex items-center gap-4 px-4 py-3 hover:bg-secondary/40 transition-colors',
-                      i < runs.length - 1 && 'border-b border-border'
-                    )}
-                  >
-                    <RunStatusBadge status={run.status} />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-foreground truncate">{run.task}</p>
-                      <p className="text-xs text-muted-foreground mt-0.5 font-mono">
-                        {run.agents_involved.join(' → ')}
-                      </p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs text-muted-foreground">{formatDistanceToNow(run.created_at)}</p>
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </TabsContent>
-
-          <TabsContent value="agents" className="mt-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {memberAgents.map(agent => (
-                <Link
-                  key={agent.name}
-                  href={`/agents/${encodeURIComponent(agent.name)}`}
-                  className="flex items-center justify-between rounded-lg border border-border bg-card px-4 py-3 hover:border-brand/40 transition-colors"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    {agent.name === form.orchestrator && (
-                      <Shield className="h-3.5 w-3.5 shrink-0" style={{ color: squadColor }} />
-                    )}
-                    <div className="min-w-0">
-                      <p className="font-mono text-sm text-foreground truncate">{agent.name}</p>
-                      <p className="text-xs text-muted-foreground truncate">{agent.role}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0 ml-2">
-                    {agent.status === 'running' && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-status-running animate-pulse" />
-                    )}
-                    <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
-                  </div>
-                </Link>
-              ))}
-            </div>
-          </TabsContent>
-        </Tabs>
+        <h2 className="mb-3 text-sm font-medium text-foreground">
+          Recent Runs {runs ? `(${runs.length})` : ''}
+        </h2>
+        {runs === null ? (
+          <div className="space-y-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="h-12 animate-pulse rounded-md bg-muted" />
+            ))}
+          </div>
+        ) : runs.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4">No runs involving this squad yet.</p>
+        ) : (
+          <div className="rounded-lg border border-border overflow-hidden">
+            {runs.map((run, i) => (
+              <Link
+                key={run.id}
+                href={`/runs/${run.id}`}
+                className={cn(
+                  'flex items-center gap-4 px-4 py-3 hover:bg-secondary/40 transition-colors',
+                  i < runs.length - 1 && 'border-b border-border'
+                )}
+              >
+                <RunStatusBadge status={run.status} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-foreground truncate">{run.task}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5 font-mono">
+                    {run.agents_involved.join(' → ')}
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-xs text-muted-foreground">{formatDistanceToNow(run.created_at)}</p>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
       </div>
+
+      <NewAgentDialog
+        open={newAgentOpen}
+        onOpenChange={setNewAgentOpen}
+        squads={[{ ...(squad), ...form, members: effectiveMembers } as Squad]}
+        initialSquadId={id}
+        lockSquad
+        onCreated={agent => {
+          setAllAgents(prev => prev.some(existing => existing.name === agent.name) ? prev : [...prev, agent])
+        }}
+        onSquadsChanged={updatedSquads => {
+          const updated = updatedSquads.find(item => item.id === id) ?? updatedSquads[0]
+          if (!updated) return
+          setSquad(updated)
+          setForm(updated)
+          getRuns()
+            .then(all => setRuns(all.filter(run => updated.members.some(member => run.agents_involved.includes(member)))))
+            .catch(() => setRuns([]))
+        }}
+      />
     </>
   )
 }

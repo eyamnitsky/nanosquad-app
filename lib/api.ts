@@ -27,6 +27,8 @@ export interface Agent {
   temperature?: number
   status: 'idle' | 'running'
   squad_id?: string
+  global_coordinator?: boolean
+  telegram_entrypoint?: boolean
 }
 
 export interface Skill {
@@ -74,6 +76,33 @@ export interface Project {
   run_count: number
   artifact_count: number
   notes?: string
+}
+
+export type RecurringTaskUnit = 'minutes' | 'hours' | 'days'
+export type RecurringWeekday = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat'
+
+export interface RecurringTask {
+  id: string
+  project_id: string
+  title: string
+  task: string
+  monitoring_guidance?: string
+  tools: string[]
+  agent?: string
+  squad_id?: string
+  every_value: number
+  every_unit: RecurringTaskUnit
+  weekdays: RecurringWeekday[]
+  run_hour: number
+  run_minute: number
+  start_at?: string
+  enabled: boolean
+  last_run_at?: string
+  next_run_at: string
+  last_status?: 'success' | 'failed'
+  last_error?: string
+  created_at: string
+  updated_at: string
 }
 
 // ---- Runs -----------------------------------------------------------------
@@ -214,6 +243,7 @@ export function streamAsk(
   options?: {
     project_id?: string
     squad_id?: string
+    agent?: string
     onEvent?: (event: { type?: string; [key: string]: unknown }) => void
   }
 ): AbortController {
@@ -227,6 +257,7 @@ export function streamAsk(
           task,
           project_id: options?.project_id,
           squad_id: options?.squad_id,
+          agent: options?.agent,
         }),
         signal: ctrl.signal,
       })
@@ -362,6 +393,40 @@ export const putProject = (id: string, data: Partial<Project>) =>
 export const deleteProject = (id: string) =>
   request<void>(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
+// ---- Project Recurring Tasks ----------------------------------------------
+
+export const getProjectRecurringTasks = (projectId: string) =>
+  request<RecurringTask[]>(`/projects/${encodeURIComponent(projectId)}/recurring-tasks`)
+
+export const createProjectRecurringTask = (
+  projectId: string,
+  data: Partial<Pick<RecurringTask, 'title' | 'task' | 'monitoring_guidance' | 'tools' | 'agent' | 'squad_id' | 'every_value' | 'every_unit' | 'weekdays' | 'run_hour' | 'run_minute' | 'start_at' | 'enabled'>>
+) =>
+  request<RecurringTask>(`/projects/${encodeURIComponent(projectId)}/recurring-tasks`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const putProjectRecurringTask = (
+  projectId: string,
+  taskId: string,
+  data: Partial<RecurringTask>
+) =>
+  request<RecurringTask>(`/projects/${encodeURIComponent(projectId)}/recurring-tasks/${encodeURIComponent(taskId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  })
+
+export const deleteProjectRecurringTask = (projectId: string, taskId: string) =>
+  request<void>(`/projects/${encodeURIComponent(projectId)}/recurring-tasks/${encodeURIComponent(taskId)}`, {
+    method: 'DELETE',
+  })
+
+export const runProjectRecurringTaskNow = (projectId: string, taskId: string) =>
+  request<{ ok: true }>(`/projects/${encodeURIComponent(projectId)}/recurring-tasks/${encodeURIComponent(taskId)}/run-now`, {
+    method: 'POST',
+  })
+
 // ---- Runs -----------------------------------------------------------------
 
 export interface RunsQuery {
@@ -409,7 +474,7 @@ export const getHealth = () => request<HealthStatus>('/health')
 
 // ---- Environment Variables ------------------------------------------------
 
-export type EnvService = 'openrouter' | 'telegram' | 'brave' | 'general'
+export type EnvService = 'openrouter' | 'telegram' | 'brave' | 'brevo' | 'general'
 export type EnvVarStatus = 'set' | 'not_set'
 
 export interface EnvVar {
@@ -419,7 +484,7 @@ export interface EnvVar {
   description: string
   required: boolean
   is_set: boolean
-  masked_value?: string   // e.g. "sk-****abcd" — only present when is_set
+  value?: string
 }
 
 export interface EnvVarUpdate {

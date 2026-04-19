@@ -28,7 +28,8 @@
 - `artifacts/`         Artifact metadata + global artifact files
 - `memory/`            Reserved runtime memory storage
 - `logs/`              Audit log JSONL
-- `config/`            Runtime config + env file
+- `config/`            Runtime settings (non-secret)
+- `~/.nemoclaw/config/env.local` Managed environment variables (secret-capable, outside repo)
 
 ## Core Runtime Flow
 
@@ -54,14 +55,18 @@ Dynamic mode selects a runtime delegation pattern and records that decision in r
 ## Environment Management
 
 Primary source:
-- `config/env.local`
+- `~/.nemoclaw/config/env.local`
+
+Optional override:
+- `AGENTPLATFORM_ENV_LOCAL_PATH`
 
 Optional secondary sync:
 - `~/.zshrc` managed block
 
 Backend guarantees:
-- never returns raw secret values from `/env`
+- returns current values from managed env file for keys present in that file
 - writes updates idempotently through `/env`
+- for managed keys, file values are loaded as the primary source of truth
 
 ## Provider Abstraction
 
@@ -85,6 +90,6 @@ Boundary contract:
 ## Security and Shareability
 
 - No machine-specific secrets in code
-- `config/env.local` is gitignored
+- managed env file is outside repo by default (`~/.nemoclaw/config/env.local`)
 - runtime data directories are gitignored
 - `.env.example` documents required variables

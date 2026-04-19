@@ -103,8 +103,33 @@ export default function AskPage() {
   const rationaleRef = useRef<string | null>(null)
 
   useEffect(() => {
-    getProjects().then(setProjects).catch(() => setProjects([]))
-    getSquads().then(setSquads).catch(() => setSquads([]))
+    let cancelled = false
+
+    Promise.all([
+      getProjects().catch(() => [] as Project[]),
+      getSquads().catch(() => [] as Squad[]),
+    ]).then(([loadedProjects, loadedSquads]) => {
+      if (cancelled) return
+      setProjects(loadedProjects)
+      setSquads(loadedSquads)
+
+      const search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+      const preselectedProjectId = search?.get('project_id')
+      if (preselectedProjectId) {
+        const match = loadedProjects.find(project => project.id === preselectedProjectId)
+        if (match) setSelectedProject(match)
+      }
+
+      const preselectedSquadId = search?.get('squad_id')
+      if (preselectedSquadId) {
+        const match = loadedSquads.find(squad => squad.id === preselectedSquadId)
+        if (match) setSelectedSquad(match)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const handleSubmit = async () => {

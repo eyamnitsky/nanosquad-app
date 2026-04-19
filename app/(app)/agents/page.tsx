@@ -9,7 +9,21 @@ import { getAgents, getSquads, type Agent, type Squad } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { NewAgentDialog } from './new-agent-dialog'
 
-function StatusDot({ status }: { status: Agent['status'] }) {
+function StatusCircle({ status, className }: { status: Agent['status']; className?: string }) {
+  return (
+    <span
+      className={cn(
+        'h-2 w-2 rounded-full',
+        status === 'running' ? 'bg-status-running animate-pulse' : 'bg-status-idle',
+        className
+      )}
+      title={status === 'running' ? 'Running' : 'Idle'}
+      aria-label={status === 'running' ? 'Running' : 'Idle'}
+    />
+  )
+}
+
+function StatusBadge({ status }: { status: Agent['status'] }) {
   return (
     <span
       className={cn(
@@ -19,10 +33,7 @@ function StatusDot({ status }: { status: Agent['status'] }) {
           : 'bg-muted text-muted-foreground'
       )}
     >
-      <span className={cn(
-        'h-1.5 w-1.5 rounded-full',
-        status === 'running' ? 'bg-status-running animate-pulse' : 'bg-status-idle'
-      )} />
+      <StatusCircle status={status} className="h-1.5 w-1.5" />
       {status}
     </span>
   )
@@ -39,6 +50,7 @@ function AgentCard({ agent, squad }: { agent: Agent; squad?: Squad }) {
     >
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="flex items-center gap-1.5 min-w-0">
+          <StatusCircle status={agent.status} className="h-2.5 w-2.5 shrink-0" />
           {isOrchestrator && squad && (
             <Shield className="h-3 w-3 shrink-0" style={{ color: squad.color }} />
           )}
@@ -46,7 +58,7 @@ function AgentCard({ agent, squad }: { agent: Agent; squad?: Squad }) {
             {agent.name}
           </h2>
         </div>
-        <StatusDot status={agent.status} />
+        <StatusBadge status={agent.status} />
       </div>
 
       <p className="text-sm text-muted-foreground leading-relaxed line-clamp-2 mb-3">
@@ -56,6 +68,21 @@ function AgentCard({ agent, squad }: { agent: Agent; squad?: Squad }) {
       <p className="font-mono text-xs text-muted-foreground/70 mb-3 truncate">
         {agent.model}
       </p>
+
+      {(agent.global_coordinator || agent.telegram_entrypoint) && (
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {agent.global_coordinator && (
+            <span className="rounded-md border border-brand/30 bg-brand/10 px-2 py-0.5 text-xs text-brand">
+              Global coordinator
+            </span>
+          )}
+          {agent.telegram_entrypoint && (
+            <span className="rounded-md border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
+              Telegram entrypoint
+            </span>
+          )}
+        </div>
+      )}
 
       {agent.skills.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
@@ -76,11 +103,13 @@ function AgentCard({ agent, squad }: { agent: Agent; squad?: Squad }) {
 function SquadSection({ squad, agents }: { squad: Squad; agents: Agent[] }) {
   const members = agents.filter(a => squad.members.includes(a.name))
   const runningCount = members.filter(a => a.status === 'running').length
+  const squadStatus: Agent['status'] = runningCount > 0 ? 'running' : 'idle'
 
   return (
     <div>
       <div className="flex items-center gap-3 mb-4">
         <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: squad.color }} />
+        <StatusCircle status={squadStatus} className="h-2.5 w-2.5 shrink-0" />
         <Link
           href={`/squads/${squad.id}`}
           className="flex items-center gap-1.5 group"
@@ -116,8 +145,26 @@ export default function AgentsPage() {
   const [newOpen, setNewOpen] = useState(false)
 
   useEffect(() => {
-    getAgents().then(setAgents).catch(() => setAgents([]))
-    getSquads().then(setSquads).catch(() => setSquads([]))
+    let alive = true
+
+    const refresh = async () => {
+      const [agentsResult, squadsResult] = await Promise.allSettled([getAgents(), getSquads()])
+      if (!alive) return
+      if (agentsResult.status === 'fulfilled') setAgents(agentsResult.value)
+      else setAgents([])
+      if (squadsResult.status === 'fulfilled') setSquads(squadsResult.value)
+      else setSquads([])
+    }
+
+    void refresh()
+    const timer = window.setInterval(() => {
+      void refresh()
+    }, 5000)
+
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
   }, [])
 
   const unassigned = agents?.filter(a =>

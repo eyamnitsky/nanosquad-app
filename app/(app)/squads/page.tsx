@@ -22,10 +22,25 @@ const POLICY_DESC: Record<Squad['delegation_policy'], string> = {
   dynamic: 'The orchestrator inspects the task at runtime and decides the delegation pattern — sequential, parallel, or solo — on the fly.',
 }
 
+function StatusCircle({ status, className }: { status: Agent['status']; className?: string }) {
+  return (
+    <span
+      className={cn(
+        'h-2 w-2 rounded-full',
+        status === 'running' ? 'bg-status-running animate-pulse' : 'bg-status-idle',
+        className
+      )}
+      title={status === 'running' ? 'Running' : 'Idle'}
+      aria-label={status === 'running' ? 'Running' : 'Idle'}
+    />
+  )
+}
+
 function SquadCard({ squad, agents }: { squad: Squad; agents: Agent[] }) {
   const members = agents.filter(a => squad.members.includes(a.name))
   const orchestratorAgent = agents.find(a => a.name === squad.orchestrator)
   const runningCount = members.filter(a => a.status === 'running').length
+  const squadStatus: Agent['status'] = runningCount > 0 ? 'running' : 'idle'
 
   return (
     <Link
@@ -40,9 +55,12 @@ function SquadCard({ squad, agents }: { squad: Squad; agents: Agent[] }) {
       />
 
       <div className="flex items-start justify-between gap-2 mb-3">
-        <h2 className="font-semibold text-sm text-foreground group-hover:text-[var(--squad-color)] transition-colors leading-tight">
-          {squad.name}
-        </h2>
+        <div className="flex items-center gap-2 min-w-0">
+          <StatusCircle status={squadStatus} className="h-2.5 w-2.5 shrink-0" />
+          <h2 className="font-semibold text-sm text-foreground group-hover:text-[var(--squad-color)] transition-colors leading-tight truncate">
+            {squad.name}
+          </h2>
+        </div>
         <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground font-mono">
           {POLICY_LABELS[squad.delegation_policy]}
         </span>
@@ -73,9 +91,7 @@ function SquadCard({ squad, agents }: { squad: Squad; agents: Agent[] }) {
               <Shield className="h-2.5 w-2.5" style={{ color: squad.color }} />
             )}
             {a.name}
-            {a.status === 'running' && (
-              <span className="h-1.5 w-1.5 rounded-full bg-status-running animate-pulse" />
-            )}
+            <StatusCircle status={a.status} className="h-1.5 w-1.5" />
           </span>
         ))}
       </div>
@@ -83,9 +99,15 @@ function SquadCard({ squad, agents }: { squad: Squad; agents: Agent[] }) {
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span className="flex items-center gap-2">
           {members.length} member{members.length !== 1 ? 's' : ''}
-          {runningCount > 0 && (
-            <span className="ml-2 text-status-running">{runningCount} running</span>
-          )}
+          <span
+            className={cn(
+              'ml-2 inline-flex items-center gap-1.5',
+              runningCount > 0 ? 'text-status-running' : 'text-muted-foreground'
+            )}
+          >
+            <StatusCircle status={squadStatus} className="h-1.5 w-1.5" />
+            {runningCount > 0 ? `${runningCount} running` : 'idle'}
+          </span>
           {squad.telegram_contact_agent && (
             <span className="inline-flex items-center gap-1 text-muted-foreground">
               <MessageCircle className="h-3 w-3" />
@@ -107,8 +129,26 @@ export default function SquadsPage() {
   const [newOpen, setNewOpen] = useState(false)
 
   useEffect(() => {
-    getSquads().then(setSquads).catch(() => setSquads([]))
-    getAgents().then(setAgents).catch(() => setAgents([]))
+    let alive = true
+
+    const refresh = async () => {
+      const [squadsResult, agentsResult] = await Promise.allSettled([getSquads(), getAgents()])
+      if (!alive) return
+      if (squadsResult.status === 'fulfilled') setSquads(squadsResult.value)
+      else setSquads([])
+      if (agentsResult.status === 'fulfilled') setAgents(agentsResult.value)
+      else setAgents([])
+    }
+
+    void refresh()
+    const timer = window.setInterval(() => {
+      void refresh()
+    }, 5000)
+
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
   }, [])
 
   const unassigned = agents.filter(a => !a.squad_id || !squads?.find(s => s.id === a.squad_id))
