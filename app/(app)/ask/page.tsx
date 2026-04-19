@@ -91,8 +91,8 @@ export default function AskPage() {
   const [history, setHistory] = useState<DispatchedTask[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [squads, setSquads] = useState<Squad[]>([])
-  const [selectedProject, setSelectedProject] = useState<Project | null>(null)
-  const [selectedSquad, setSelectedSquad] = useState<Squad | null>(null)
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+  const [selectedSquadId, setSelectedSquadId] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
 
   const ctrlRef = useRef<AbortController | null>(null)
@@ -104,6 +104,12 @@ export default function AskPage() {
 
   useEffect(() => {
     let cancelled = false
+    const search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+    const preselectedProjectId = search?.get('project_id')?.trim() || null
+    const preselectedSquadId = search?.get('squad_id')?.trim() || null
+
+    if (preselectedProjectId) setSelectedProjectId(preselectedProjectId)
+    if (preselectedSquadId) setSelectedSquadId(preselectedSquadId)
 
     Promise.all([
       getProjects().catch(() => [] as Project[]),
@@ -112,19 +118,6 @@ export default function AskPage() {
       if (cancelled) return
       setProjects(loadedProjects)
       setSquads(loadedSquads)
-
-      const search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
-      const preselectedProjectId = search?.get('project_id')
-      if (preselectedProjectId) {
-        const match = loadedProjects.find(project => project.id === preselectedProjectId)
-        if (match) setSelectedProject(match)
-      }
-
-      const preselectedSquadId = search?.get('squad_id')
-      if (preselectedSquadId) {
-        const match = loadedSquads.find(squad => squad.id === preselectedSquadId)
-        if (match) setSelectedSquad(match)
-      }
     })
 
     return () => {
@@ -132,9 +125,19 @@ export default function AskPage() {
     }
   }, [])
 
+  const selectedProject = selectedProjectId
+    ? projects.find(project => project.id === selectedProjectId) ?? null
+    : null
+
+  const selectedSquad = selectedSquadId
+    ? squads.find(squad => squad.id === selectedSquadId) ?? null
+    : null
+
   const handleSubmit = async () => {
     if (!task.trim() || streaming) return
     const currentTask = task.trim()
+    const currentProjectId = selectedProjectId ?? undefined
+    const currentSquadId = selectedSquadId ?? undefined
     setTask('')
     setOutput('')
     outputTextRef.current = ''
@@ -149,8 +152,8 @@ export default function AskPage() {
 
     createRun({
       task: currentTask,
-      project_id: selectedProject?.id,
-      squad_id: selectedSquad?.id,
+      project_id: currentProjectId,
+      squad_id: currentSquadId,
     }).then(run => {
       setRunId(run.id)
       runIdRef.current = run.id
@@ -176,7 +179,7 @@ export default function AskPage() {
           output: outputTextRef.current,
           timestamp: new Date().toISOString(),
           runId: runIdRef.current ?? undefined,
-          projectId: selectedProject?.id,
+          projectId: currentProjectId,
         }, ...prev])
       },
       () => {
@@ -187,8 +190,8 @@ export default function AskPage() {
         setStreamDone(true)
       },
       {
-        project_id: selectedProject?.id,
-        squad_id: selectedSquad?.id,
+        project_id: currentProjectId,
+        squad_id: currentSquadId,
         onEvent: event => {
           if (event.type === 'routing') {
             const agentName = typeof event.agent === 'string' ? event.agent : 'dispatcher'
@@ -254,17 +257,17 @@ export default function AskPage() {
                   )}
                 >
                   <FolderOpen className="h-3.5 w-3.5" />
-                  {selectedProject ? selectedProject.name : 'No project'}
+                  {selectedProject ? selectedProject.name : selectedProjectId ?? 'No project'}
                   <ChevronDown className="h-3 w-3 ml-0.5 opacity-70" />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-56">
-                <DropdownMenuItem onClick={() => setSelectedProject(null)} className="text-xs">
+                <DropdownMenuItem onClick={() => setSelectedProjectId(null)} className="text-xs">
                   No project
                 </DropdownMenuItem>
                 {projects.length > 0 && <DropdownMenuSeparator />}
                 {projects.map(p => (
-                  <DropdownMenuItem key={p.id} onClick={() => setSelectedProject(p)} className="text-xs">
+                  <DropdownMenuItem key={p.id} onClick={() => setSelectedProjectId(p.id)} className="text-xs">
                     {p.name}
                   </DropdownMenuItem>
                 ))}
@@ -276,7 +279,7 @@ export default function AskPage() {
                 <button
                   className={cn(
                     'flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors border',
-                    selectedSquad
+                    selectedSquadId
                       ? 'border-[var(--sq-color)]/50 text-foreground'
                       : 'border-border bg-secondary text-muted-foreground hover:text-foreground'
                   )}
@@ -295,11 +298,11 @@ export default function AskPage() {
                   Route task to squad
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => setSelectedSquad(null)} className="text-xs">
+                <DropdownMenuItem onClick={() => setSelectedSquadId(null)} className="text-xs">
                   Any squad (auto-dispatch)
                 </DropdownMenuItem>
                 {squads.map(s => (
-                  <DropdownMenuItem key={s.id} onClick={() => setSelectedSquad(s)} className="text-xs flex items-center gap-2">
+                  <DropdownMenuItem key={s.id} onClick={() => setSelectedSquadId(s.id)} className="text-xs flex items-center gap-2">
                     <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
                     <span>{s.name}</span>
                     <span className="ml-auto font-mono text-muted-foreground">{s.delegation_policy}</span>
