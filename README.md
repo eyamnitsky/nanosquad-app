@@ -112,6 +112,49 @@ Notes:
 - Marco is a configuration pattern, not a hardcoded special-case in source.
 - You can use any name, but keeping `marco` makes team operations clearer.
 
+## Working with Projects
+
+Projects are the container for ongoing work context (notes), execution history (runs), and outputs (artifacts).
+
+### In the UI
+
+1. Create a project from the **Projects** tab.
+2. Select the owning squad (required).
+3. Add description and notes.
+4. Open the project and use **Dispatch a task** to run work in project context.
+
+Behavior:
+- Projects are grouped by squad in the Projects view.
+- Project detail shows squad ownership.
+- Tasks dispatched from a project carry both `project_id` and `squad_id`.
+
+### Through Marco (Telegram)
+
+Marco has the `project_ops` skill enabled and can work with projects directly when you mention them.
+
+Use patterns like:
+- `Use Test project and draft a launch checklist.`
+- `In Test project, ask Gail and Sam to collaborate on messaging.`
+- `Create project "Q2 Outbound Sprint" in squad liazon. Notes: Focus on founder ICP and weekly cadence.`
+
+Behavior:
+- If a known project name/id is mentioned, Marco resolves it and uses project notes as context.
+- If you ask to create a project, Marco can create it with squad ownership.
+- Imported Telegram runs are matched to project mentions and persisted with `project_id` when a match is found.
+
+### What gets persisted
+
+- Project metadata: `projects/<project_id>/project.json`
+- Project recurring tasks: `projects/<project_id>/recurring-tasks.json`
+- Project-linked runs: `runs/<run_id>.json` with `project_id`
+- Project artifacts: `projects/<project_id>/artifacts/`
+
+### Best practices
+
+- Use exact project names in Telegram for best matching.
+- Include squad explicitly when creating a project.
+- Keep project notes current so Marco has reliable operating context.
+
 ## Environment Variables
 
 Managed env vars are primarily stored in:

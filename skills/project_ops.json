@@ -1,0 +1,5 @@
+{
+  "name": "project_ops",
+  "description": "Finds projects by name, uses project context, and can create projects with squad ownership.",
+  "code": "# NanoSquad built-in project operations skill"
+}

@@ -47,6 +47,7 @@ const ENV_BLOCK_START = '# >>> AgentPlatform env vars >>>'
 const ENV_BLOCK_END = '# <<< AgentPlatform env vars <<<'
 const NEMOCLAW_WORKSPACE_PATH = process.env.NEMOCLAW_WORKSPACE_PATH?.trim() || '/sandbox/.openclaw-data/workspace'
 const NEMOCLAW_REGISTRY_FILENAME = 'NANOSQUAD_REGISTRY.md'
+const NEMOCLAW_PROJECTS_FILENAME = 'NANOSQUAD_PROJECTS.md'
 const IDENTITY_GUIDANCE_START = '<!-- nanosquad-registry-guidance:start -->'
 const IDENTITY_GUIDANCE_END = '<!-- nanosquad-registry-guidance:end -->'
 const NEMOCLAW_AGENT_SYNC_TEMPLATE_DOCKERFILE_PATH = path.resolve(
@@ -660,18 +661,31 @@ async function seedDefaults(): Promise<void> {
     })
   }
 
-  const skillFiles = (await fs.readdir(PATHS.skills)).filter(name => name.endsWith('.json'))
-  if (skillFiles.length === 0) {
-    await writeJsonFile(path.join(PATHS.skills, 'web_search.json'), {
-      name: 'web_search',
-      description: 'Queries web search APIs and returns summarized results.',
-      code: '# NemoClaw skill placeholder for web search',
-    })
-    await writeJsonFile(path.join(PATHS.skills, 'code_exec.json'), {
-      name: 'code_exec',
-      description: 'Runs code snippets in a controlled environment.',
-      code: '# NemoClaw skill placeholder for code execution',
-    })
+  const ensureBuiltinSkill = async (name: string, description: string, code: string): Promise<void> => {
+    const filePath = path.join(PATHS.skills, `${name}.json`)
+    if (await pathExists(filePath)) return
+    await writeJsonFile(filePath, { name, description, code })
+  }
+
+  await ensureBuiltinSkill(
+    'web_search',
+    'Queries web search APIs and returns summarized results.',
+    '# NemoClaw skill placeholder for web search'
+  )
+  await ensureBuiltinSkill(
+    'code_exec',
+    'Runs code snippets in a controlled environment.',
+    '# NemoClaw skill placeholder for code execution'
+  )
+  await ensureBuiltinSkill(
+    'project_ops',
+    'Finds projects by name, uses project context, and can create projects with squad ownership.',
+    '# NanoSquad built-in project operations skill'
+  )
+
+  const marco = await getAgent('marco')
+  if (marco && !marco.skills.includes('project_ops')) {
+    await putAgent('marco', { skills: [...marco.skills, 'project_ops'] })
   }
 }
 
@@ -1043,6 +1057,122 @@ async function deleteProject(id: string): Promise<void> {
   if (await pathExists(projectDir)) {
     await fs.rm(projectDir, { recursive: true, force: true })
   }
+}
+
+function normalizeLookupText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function hasNormalizedPhrase(haystack: string, phrase: string): boolean {
+  if (!haystack || !phrase) return false
+  const compactPhrase = phrase.trim()
+  if (!compactPhrase) return false
+  const pattern = new RegExp(`(?:^|\\s)${escapeRegex(compactPhrase).replace(/\s+/g, '\\s+')}(?:$|\\s)`, 'i')
+  return pattern.test(haystack)
+}
+
+function detectCreateProjectIntent(task: string): boolean {
+  const lower = task.toLowerCase()
+  return /\b(create|new|start|open|init(?:ialize)?)\b/.test(lower) && /\bproject\b/.test(lower)
+}
+
+function extractProjectNameFromTask(task: string): string | null {
+  const quotedMatch = task.match(/\bproject(?:\s+(?:named|called))?\s+["“'`](.+?)["”'`]/i)
+  if (quotedMatch?.[1]?.trim()) return quotedMatch[1].trim()
+
+  const plainMatch = task.match(/\b(?:create|new|start|open|init(?:ialize)?)\s+(?:a\s+)?project(?:\s+(?:named|called))?\s+(.+)$/i)
+  if (!plainMatch?.[1]) return null
+
+  const trimmed = plainMatch[1]
+    .split(/\r?\n/)[0]
+    .replace(/\s+(?:in|for|under|with)\s+(?:squad|team)\b.*$/i, '')
+    .replace(/\b(?:description|notes?)\s*[:=-].*$/i, '')
+    .replace(/[.,;:!?]+$/g, '')
+    .trim()
+
+  return trimmed.length >= 2 ? trimmed : null
+}
+
+function resolveSquadFromTaskText(task: string, squads: Squad[]): Squad | null {
+  if (squads.length === 0) return null
+  const normalizedTask = normalizeLookupText(task)
+  if (!normalizedTask) return null
+
+  const sorted = [...squads].sort(
+    (a, b) => normalizeLookupText(b.name).length - normalizeLookupText(a.name).length
+  )
+  for (const squad of sorted) {
+    const byId = normalizeLookupText(squad.id)
+    const byName = normalizeLookupText(squad.name)
+    if ((byId && hasNormalizedPhrase(normalizedTask, byId)) || (byName && hasNormalizedPhrase(normalizedTask, byName))) {
+      return squad
+    }
+  }
+  return null
+}
+
+async function resolveProjectFromTaskText(task: string, projectsInput?: Project[]): Promise<Project | null> {
+  const normalizedTask = normalizeLookupText(task)
+  if (!normalizedTask) return null
+  const projects = projectsInput ?? (await listProjects())
+  if (projects.length === 0) return null
+
+  const byId = projects.find(project => {
+    const normalizedId = normalizeLookupText(project.id)
+    return normalizedId.length >= 4 && hasNormalizedPhrase(normalizedTask, normalizedId)
+  })
+  if (byId) return byId
+
+  const sorted = [...projects].sort(
+    (a, b) => normalizeLookupText(b.name).length - normalizeLookupText(a.name).length
+  )
+  for (const project of sorted) {
+    const normalizedName = normalizeLookupText(project.name)
+    if (normalizedName.length < 2) continue
+    if (hasNormalizedPhrase(normalizedTask, normalizedName)) return project
+  }
+
+  return null
+}
+
+async function ensureProjectForTaskText(
+  task: string,
+  projects: Project[],
+  squads: Squad[],
+  fallbackSquadId?: string
+): Promise<{ project: Project | null; created: boolean }> {
+  const matched = await resolveProjectFromTaskText(task, projects)
+  if (matched) return { project: matched, created: false }
+  if (!detectCreateProjectIntent(task)) return { project: null, created: false }
+
+  const projectName = extractProjectNameFromTask(task)
+  if (!projectName) return { project: null, created: false }
+
+  const exact = projects.find(
+    project => normalizeLookupText(project.name) === normalizeLookupText(projectName)
+  )
+  if (exact) return { project: exact, created: false }
+
+  const explicitSquad = resolveSquadFromTaskText(task, squads)
+  const fallbackSquad = fallbackSquadId ? squads.find(squad => squad.id === fallbackSquadId) : undefined
+  const squad = explicitSquad ?? fallbackSquad
+  if (!squad) return { project: null, created: false }
+
+  const id = `proj-${Date.now()}-${randomUUID().slice(0, 6)}`
+  const descriptionMatch = task.match(/\bdescription\s*[:=-]\s*([^\n]+)/i)
+  const notesMatch = task.match(/\bnotes?\s*[:=-]\s*([\s\S]+)/i)
+  const created = await putProject(id, {
+    id,
+    name: projectName,
+    description: descriptionMatch?.[1]?.trim() ?? '',
+    notes: notesMatch?.[1]?.trim() ?? '',
+    squad_id: squad.id,
+  })
+  projects.push(created)
+  return { project: created, created: true }
 }
 
 function recurringTasksFilePath(projectId: string): string {
@@ -1917,10 +2047,11 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
   const ready = await isSandboxReady(sandboxName)
   if (!ready) return
 
-  const [sessions, agents, squads] = await Promise.all([
+  const [sessions, agents, squads, projects] = await Promise.all([
     listOpenClawSessionsFromSandbox(sandboxName),
     listAgents(),
     listSquads(),
+    listProjects(),
   ])
   if (sessions.length === 0) return
 
@@ -1928,6 +2059,7 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
   const telegramEntrypointName = agents.find(agent => agent.telegram_entrypoint)?.name
 
   const importedRuns = new Map<string, Run>()
+  let createdProjectDuringImport = false
 
   for (const session of sessions) {
     const transcriptRaw = await readOpenClawSessionTranscript(sandboxName, session)
@@ -1948,6 +2080,7 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
         const childAgent = canonicalAgentName(runtimeCompletion.agent, byLowerName)
         const parentAgent = resolveSessionAgentName(session, byLowerName, telegramEntrypointName)
         const createdAt = transcriptTimestamp(event)
+        const referencedProject = await resolveProjectFromTaskText(runtimeCompletion.task, projects)
         const runId = `run-ext-${hashId([
           'subagent',
           session.sessionId,
@@ -1961,7 +2094,8 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
           status: runtimeCompletion.success ? 'completed' : 'failed',
           agent: childAgent,
           agents_involved: [...new Set([parentAgent, childAgent])],
-          squad: findPrimarySquadId(childAgent, squads),
+          squad: referencedProject?.squad_id ?? findPrimarySquadId(childAgent, squads),
+          project_id: referencedProject?.id,
           created_at: createdAt,
           completed_at: createdAt,
           duration_seconds: 0,
@@ -2008,6 +2142,14 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
       }
 
       const parentAgent = resolveSessionAgentName(session, byLowerName, telegramEntrypointName)
+      const ensuredProject = await ensureProjectForTaskText(
+        task,
+        projects,
+        squads,
+        findPrimarySquadId(parentAgent, squads)
+      )
+      const referencedProject = ensuredProject.project
+      if (ensuredProject.created) createdProjectDuringImport = true
       const involvedAgents = new Set<string>([parentAgent])
       const createdAt = transcriptTimestamp(event)
       let completedAt: string | undefined
@@ -2081,7 +2223,8 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
         status,
         agent: parentAgent,
         agents_involved: involvedList,
-        squad: findPrimarySquadId(parentAgent, squads),
+        squad: referencedProject?.squad_id ?? findPrimarySquadId(parentAgent, squads),
+        project_id: referencedProject?.id,
         created_at: createdAt,
         completed_at: completedAt,
         duration_seconds: completedAt ? 0 : undefined,
@@ -2101,6 +2244,10 @@ async function syncNemoclawRunsFromTranscripts(): Promise<void> {
       await saveRun(run)
     })
   )
+
+  if (createdProjectDuringImport) {
+    await syncNemoclawWorkspaceContextBestEffort()
+  }
 }
 
 async function syncNemoclawRunsFromTranscriptsBestEffort(): Promise<void> {
@@ -2188,11 +2335,50 @@ function buildRegistryMarkdown(agents: Agent[], squads: Squad[]): string {
   return `${lines.join('\n').trim()}\n`
 }
 
+function buildProjectsMarkdown(projects: Project[], squads: Squad[]): string {
+  const now = nowIso()
+  const sortedProjects = [...projects].sort((a, b) => a.name.localeCompare(b.name))
+
+  const lines: string[] = []
+  lines.push('# NanoSquad Projects')
+  lines.push('')
+  lines.push(`Generated: ${now}`)
+  lines.push('Source: nanosquad-app project registry')
+  lines.push('')
+  lines.push('Use this file when a user references a project by name in Telegram or chat.')
+  lines.push('If a project is mentioned, load its context from this file before answering.')
+  lines.push('')
+
+  if (sortedProjects.length === 0) {
+    lines.push('No projects are currently defined.')
+    lines.push('')
+    return `${lines.join('\n').trim()}\n`
+  }
+
+  for (const project of sortedProjects) {
+    const squad = project.squad_id ? squads.find(item => item.id === project.squad_id) : undefined
+    lines.push(`## ${project.name}`)
+    lines.push(`- id: ${project.id}`)
+    lines.push(`- squad: ${squad?.name ?? project.squad_id ?? '(none)'}`)
+    lines.push(`- description: ${project.description || '(none)'}`)
+    lines.push(`- runs: ${project.run_count}`)
+    lines.push(`- artifacts: ${project.artifact_count}`)
+    lines.push('- notes:')
+    lines.push('```markdown')
+    lines.push(project.notes || '')
+    lines.push('```')
+    lines.push('')
+  }
+
+  return `${lines.join('\n').trim()}\n`
+}
+
 function upsertIdentityRegistryGuidance(current: string): string {
   const guidance = [
     IDENTITY_GUIDANCE_START,
     '## Live Registry',
     `For live agent/squad membership and squad lore, read \`${NEMOCLAW_REGISTRY_FILENAME}\` before answering org-structure questions.`,
+    `For project lookup and project notes context, read \`${NEMOCLAW_PROJECTS_FILENAME}\` when a project is mentioned.`,
     IDENTITY_GUIDANCE_END,
   ].join('\n')
 
@@ -2211,8 +2397,9 @@ async function syncNemoclawWorkspaceContext(): Promise<void> {
   const ready = await isSandboxReady(sandboxName)
   if (!ready) return
 
-  const [agents, squads] = await Promise.all([listAgents(), listSquads()])
+  const [agents, squads, projects] = await Promise.all([listAgents(), listSquads(), listProjects()])
   const registry = buildRegistryMarkdown(agents, squads)
+  const projectsRegistry = buildProjectsMarkdown(projects, squads)
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nanosquad-registry-'))
 
   try {
@@ -2224,6 +2411,16 @@ async function syncNemoclawWorkspaceContext(): Promise<void> {
       sandboxName,
       localRegistryPath,
       `${NEMOCLAW_WORKSPACE_PATH}/${NEMOCLAW_REGISTRY_FILENAME}`,
+    ])
+
+    const localProjectsPath = path.join(tempDir, NEMOCLAW_PROJECTS_FILENAME)
+    await writeText(localProjectsPath, projectsRegistry)
+    await runOpenShellWithCandidates([
+      'sandbox',
+      'upload',
+      sandboxName,
+      localProjectsPath,
+      `${NEMOCLAW_WORKSPACE_PATH}/${NEMOCLAW_PROJECTS_FILENAME}`,
     ])
 
     const localIdentityPath = path.join(tempDir, 'IDENTITY.md')
@@ -2513,6 +2710,14 @@ function chooseSkillForTask(task: string, availableSkills: string[]): string | u
   const normalizedSkills = new Set(availableSkills.map(skill => skill.trim().toLowerCase()))
 
   if (
+    normalizedSkills.has('project_ops') &&
+    /\b(project|projects)\b/.test(lowerTask) &&
+    /\b(create|new|start|open|use|context|notes?|find|lookup|look up)\b/.test(lowerTask)
+  ) {
+    return availableSkills.find(skill => skill.trim().toLowerCase() === 'project_ops')
+  }
+
+  if (
     normalizedSkills.has('web_search') &&
     /\b(web|internet|online|browse|search|lookup|look up|latest|current|today|news|recent)\b/.test(lowerTask)
   ) {
@@ -2646,13 +2851,116 @@ async function executeBraveWebSearchSkill(task: string): Promise<{ ok: boolean; 
   }
 }
 
+async function executeProjectOpsSkill(
+  task: string,
+  preferredSquadId?: string
+): Promise<{ ok: boolean; output: string; message: string; project_id?: string }> {
+  const squads = await listSquads()
+  const projects = await listProjects()
+
+  if (detectCreateProjectIntent(task)) {
+    const projectName = extractProjectNameFromTask(task)
+    if (!projectName) {
+      return {
+        ok: false,
+        output: '',
+        message: 'project_ops could not determine a project name. Try: create project "Name" in squad liazon.',
+      }
+    }
+
+    const existing = projects.find(
+      project => normalizeLookupText(project.name) === normalizeLookupText(projectName)
+    )
+    if (existing) {
+      return {
+        ok: true,
+        output: [
+          `Project already exists: ${existing.name}`,
+          `id: ${existing.id}`,
+          `squad: ${existing.squad_id ?? 'unassigned'}`,
+          existing.notes ? `notes: ${existing.notes}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        message: 'project_ops matched an existing project.',
+        project_id: existing.id,
+      }
+    }
+
+    const explicitSquad = resolveSquadFromTaskText(task, squads)
+    const fallbackSquad = preferredSquadId ? squads.find(squad => squad.id === preferredSquadId) : undefined
+    const squad = explicitSquad ?? fallbackSquad
+
+    if (!squad) {
+      return {
+        ok: false,
+        output: '',
+        message: `project_ops needs a squad. Available squads: ${squads.map(item => item.id).join(', ') || '(none)'}`,
+      }
+    }
+
+    const id = `proj-${Date.now()}-${randomUUID().slice(0, 6)}`
+    const descriptionMatch = task.match(/\bdescription\s*[:=-]\s*([^\n]+)/i)
+    const notesMatch = task.match(/\bnotes?\s*[:=-]\s*([\s\S]+)/i)
+    const created = await putProject(id, {
+      id,
+      name: projectName,
+      description: descriptionMatch?.[1]?.trim() ?? '',
+      notes: notesMatch?.[1]?.trim() ?? '',
+      squad_id: squad.id,
+    })
+
+    return {
+      ok: true,
+      output: [
+        `Created project: ${created.name}`,
+        `id: ${created.id}`,
+        `squad: ${created.squad_id ?? squad.id}`,
+        created.description ? `description: ${created.description}` : '',
+        created.notes ? `notes: ${created.notes}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      message: 'project_ops created a new project.',
+      project_id: created.id,
+    }
+  }
+
+  const resolved = await resolveProjectFromTaskText(task, projects)
+  if (!resolved) {
+    return {
+      ok: false,
+      output: '',
+      message: 'project_ops found no matching project in the task text.',
+    }
+  }
+
+  return {
+    ok: true,
+    output: [
+      `Project context`,
+      `id: ${resolved.id}`,
+      `name: ${resolved.name}`,
+      `description: ${resolved.description || '(none)'}`,
+      `notes: ${resolved.notes || '(none)'}`,
+      `squad: ${resolved.squad_id || '(none)'}`,
+    ].join('\n'),
+    message: 'project_ops resolved project context from task text.',
+    project_id: resolved.id,
+  }
+}
+
 async function maybeExecuteNemoclawSkill(params: {
   skillName: string
   task: string
-}): Promise<{ ok: boolean; output: string; message: string }> {
+  preferredSquadId?: string
+}): Promise<{ ok: boolean; output: string; message: string; project_id?: string }> {
   const normalizedSkill = params.skillName.trim().toLowerCase()
   if (normalizedSkill === 'web_search') {
     return executeBraveWebSearchSkill(params.task)
+  }
+  if (normalizedSkill === 'project_ops') {
+    return executeProjectOpsSkill(params.task, params.preferredSquadId)
   }
 
   const cliPath = process.env.NEMOCLAW_CLI_PATH
@@ -2979,11 +3287,13 @@ async function runTask(params: {
   }
 
   const settings = await readSettings()
-  const project = params.project_id ? await getProject(params.project_id) : null
+  let project = params.project_id ? await getProject(params.project_id) : null
+  if (!project) {
+    project = await resolveProjectFromTaskText(params.task)
+  }
   const allSquads = await listSquads()
-  const requestedSquad = params.preferredSquadId
-    ? allSquads.find(squad => squad.id === params.preferredSquadId)
-    : undefined
+  const squadHintId = params.preferredSquadId || project?.squad_id
+  const requestedSquad = squadHintId ? allSquads.find(squad => squad.id === squadHintId) : undefined
 
   const candidatePool = requestedSquad
     ? agents.filter(agent => agent.global_coordinator || requestedSquad.members.includes(agent.name))
@@ -3107,12 +3417,27 @@ async function runTask(params: {
         skill: skillMatch,
       })
     )
-    const skillResult = await maybeExecuteNemoclawSkill({ skillName: skillMatch, task: effectiveTask })
+    const skillResult = await maybeExecuteNemoclawSkill({
+      skillName: skillMatch,
+      task: effectiveTask,
+      preferredSquadId: requestedSquad?.id,
+    })
     run.steps[run.steps.length - 1] = {
       ...run.steps[run.steps.length - 1],
       status: skillResult.ok ? 'done' : 'error',
       completed_at: nowIso(),
       description: skillResult.message,
+    }
+
+    if (!project && skillResult.project_id) {
+      const resolvedFromSkill = await getProject(skillResult.project_id)
+      if (resolvedFromSkill) {
+        project = resolvedFromSkill
+        run.project_id = resolvedFromSkill.id
+        if (!run.squad && resolvedFromSkill.squad_id) {
+          run.squad = resolvedFromSkill.squad_id
+        }
+      }
     }
 
     if (skillResult.ok && skillResult.output.trim()) {
@@ -3654,6 +3979,7 @@ async function bootstrap(): Promise<void> {
       notes: body.notes ?? '',
       squad_id: squadId,
     })
+    await syncNemoclawWorkspaceContextBestEffort()
     res.json(project)
   })
 
@@ -3666,6 +3992,7 @@ async function bootstrap(): Promise<void> {
         }
       }
       const project = await putProject(req.params.id, req.body as Partial<Project>)
+      await syncNemoclawWorkspaceContextBestEffort()
       res.json(project)
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Failed to save project')
@@ -3674,6 +4001,7 @@ async function bootstrap(): Promise<void> {
 
   app.delete('/projects/:id', async (req, res) => {
     await deleteProject(req.params.id)
+    await syncNemoclawWorkspaceContextBestEffort()
     res.json({ ok: true })
   })
 
