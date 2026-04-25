@@ -5,13 +5,13 @@ Agent-centric control plane for NemoClaw with a Next.js UI and a file-backed bac
 ## Overview
 
 Primary entities:
-- Agents (`/agents/*.yaml`)
+- Agents (`~/.nemoclaw/agents/*.yaml` by default)
 - Skills (`/skills/*.json`)
-- Squads (`/squads/*.yaml`)
-- Projects (`/projects/<id>/project.json`)
-- Runs (`/runs/<id>.json`)
-- Artifacts (`/artifacts/*.json` + project/global artifact files)
-- Logs (`/logs/audit.jsonl`)
+- Squads (`~/.nemoclaw/squads/*.yaml` by default)
+- Projects (`~/.nemoclaw/projects/<id>/project.json`)
+- Runs (`~/.nemoclaw/runs/<id>.json`)
+- Artifacts (`~/.nemoclaw/artifacts/*.json` + project/global artifact files)
+- Logs (`/logs/audit.jsonl`, app-local service logs)
 - Settings (`/config/`) + managed env (`~/.nemoclaw/config/env.local`)
 
 This repository is built to be GitHub-safe:
@@ -44,7 +44,7 @@ This repository is built to be GitHub-safe:
 
 - UI: Next.js app (this repo root, `app/`, `components/`, `lib/`)
 - Backend API: Express TypeScript service (`/src/server.ts`, default `:8000`)
-- Storage: local filesystem directories in repo root
+- Storage: local filesystem directories, with agents, squads, projects, runs, artifacts, and memory owned by the real `~/.nemoclaw` tree by default
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for full details.
 
@@ -74,7 +74,7 @@ pnpm dev:all
 
 ## Default Bootstrapped Workspace
 
-On first boot (when no local agents/squads/skills exist), the app seeds:
+On first boot (when no local NemoClaw agents/squads and no app-local skills exist), the app seeds:
 
 - Agents:
   - `researcher` (research-focused)
@@ -257,9 +257,9 @@ Default ports:
 This repo is set up so local runtime data and personal configs stay out of git:
 - managed secrets file (`~/.nemoclaw/config/env.local`) is external to this repo
 - local `.env` and `config/settings.json` are ignored
-- no agent YAMLs are tracked in git (`agents/` is structure-only)
-- only baseline squad config tracked is `squads/core.yaml`
-- additional local agents/squads created on your machine are ignored by default
+- agent and squad YAMLs are owned by NemoClaw, not this app repo
+- projects, runs, artifacts, and memory are owned by NemoClaw, not this app repo
+- set `NEMOCLAW_CONFIG_ROOT` only when you intentionally want a different real NemoClaw config root
 
 ## Setup and Ops Docs
 

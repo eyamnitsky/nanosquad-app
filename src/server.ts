@@ -18,22 +18,25 @@ function expandHomePath(input: string): string {
 }
 
 const ROOT = process.cwd()
+const NEMOCLAW_HOME = path.resolve(
+  expandHomePath(process.env.NEMOCLAW_HOME?.trim() || path.join(os.homedir(), '.nemoclaw'))
+)
+const NEMOCLAW_CONFIG_ROOT = path.resolve(
+  expandHomePath(process.env.NEMOCLAW_CONFIG_ROOT?.trim() || NEMOCLAW_HOME)
+)
 const PATHS = {
-  agents: path.join(ROOT, 'agents'),
+  agents: path.join(NEMOCLAW_CONFIG_ROOT, 'agents'),
   skills: path.join(ROOT, 'skills'),
-  squads: path.join(ROOT, 'squads'),
-  projects: path.join(ROOT, 'projects'),
-  runs: path.join(ROOT, 'runs'),
-  artifacts: path.join(ROOT, 'artifacts'),
-  memory: path.join(ROOT, 'memory'),
+  squads: path.join(NEMOCLAW_CONFIG_ROOT, 'squads'),
+  projects: path.join(NEMOCLAW_CONFIG_ROOT, 'projects'),
+  runs: path.join(NEMOCLAW_CONFIG_ROOT, 'runs'),
+  artifacts: path.join(NEMOCLAW_CONFIG_ROOT, 'artifacts'),
+  memory: path.join(NEMOCLAW_CONFIG_ROOT, 'memory'),
   logs: path.join(ROOT, 'logs'),
   config: path.join(ROOT, 'config'),
 }
 
 const SETTINGS_PATH = path.join(PATHS.config, 'settings.json')
-const NEMOCLAW_HOME = path.resolve(
-  expandHomePath(process.env.NEMOCLAW_HOME?.trim() || path.join(os.homedir(), '.nemoclaw'))
-)
 const DEFAULT_MANAGED_ENV_PATH = path.join(NEMOCLAW_HOME, 'config', 'env.local')
 const LEGACY_ENV_LOCAL_PATH = path.join(PATHS.config, 'env.local')
 const ENV_LOCAL_PATH = path.resolve(

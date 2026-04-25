@@ -21,18 +21,11 @@ node_modules
 logs/*
 !logs/.gitkeep
 memory/*
-!memory/.gitkeep
 runs/*
-!runs/.gitkeep
 artifacts/*
-!artifacts/.gitkeep
 projects/*
-!projects/.gitkeep
 config/settings.json
 
-# Keep repository shareable:
-# allow only baseline agent/squad templates in git;
-# keep user-created local configs out of commits.
-agents/*.yaml
-squads/*.yaml
-!squads/core.yaml
+# Keep repository shareable: agent/squad YAMLs are owned by NemoClaw.
+agents/*
+squads/*
