@@ -3107,7 +3107,7 @@ async function maybeExecuteNemoclawSkill(params: {
     return {
       ok: false,
       output: '',
-      message: 'send_email is registered but is not auto-executed by NanoSquad. Create Gmail drafts first, or send only after explicit user approval through an approved mailer.',
+      message: 'send_email is a NemoClaw/OpenClaw skill and is not auto-executed by the NanoSquad management layer. Continue by instructing Sam to use the NemoClaw send_email skill only when the user explicitly asks to send now or send without drafts.',
     }
   }
 

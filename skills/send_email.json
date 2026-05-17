@@ -1,5 +1,0 @@
-{
-  "name": "send_email",
-  "description": "Send Gmail email only after explicit user approval. Use sparingly; Liazon outreach should normally be prepared as Gmail drafts first for manual review.",
-  "code": "Use the existing Gmail send capability from /Users/openclaw/.nemoclaw/openclaw-state/skills/gmail_send. Required fields: to, subject, body. Always require explicit user approval before sending, preserve the approved copy exactly except for requested corrections, and BCC eugene.yamnitsky@gmail.com unless the user says otherwise."
-}
