@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Plus, Trash2, Wrench } from 'lucide-react'
+import { Edit3, Plus, Trash2, Wrench } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -11,7 +11,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { getSkills, createSkill, deleteSkill, type Skill } from '@/lib/api'
+import { getSkills, createSkill, deleteSkill, updateSkill, type Skill } from '@/lib/api'
 import { useToast } from '@/hooks/use-toast'
 
 const SKILL_SCAFFOLD = `# Skill metadata / notes
@@ -21,9 +21,11 @@ const SKILL_SCAFFOLD = `# Skill metadata / notes
 
 function SkillRow({
   skill,
+  onEdit,
   onDelete,
 }: {
   skill: Skill
+  onEdit: (skill: Skill) => void
   onDelete: (name: string) => void
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -34,6 +36,9 @@ function SkillRow({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 mb-1">
               <span className="font-mono text-sm font-medium text-foreground">{skill.name}</span>
+              <span className="rounded-md bg-secondary px-1.5 py-0.5 text-[11px] font-mono text-muted-foreground">
+                {skill.source === 'hybrid' ? 'json + md' : skill.source === 'markdown' ? 'md' : 'json'}
+              </span>
               {skill.agents.length > 0 && (
                 <div className="flex flex-wrap gap-1">
                   {skill.agents.map(a => (
@@ -45,15 +50,31 @@ function SkillRow({
               )}
             </div>
             <p className="text-sm text-muted-foreground leading-relaxed">{skill.description}</p>
+            {skill.markdown_path && (
+              <p className="mt-1 truncate font-mono text-xs text-muted-foreground/70">{skill.markdown_path}</p>
+            )}
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setConfirmOpen(true)}
-            className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive-foreground shrink-0"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
+          <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onEdit(skill)}
+              className="text-muted-foreground"
+              title={skill.markdown ? 'Edit Markdown' : 'Edit skill record'}
+            >
+              <Edit3 className="h-3.5 w-3.5" />
+            </Button>
+            {skill.source === 'app_json' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setConfirmOpen(true)}
+                className="text-muted-foreground hover:text-destructive-foreground"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -84,8 +105,11 @@ export default function SkillsPage() {
   const { toast } = useToast()
   const [skills, setSkills] = useState<Skill[] | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
+  const [editorOpen, setEditorOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState({ name: '', description: '', code: SKILL_SCAFFOLD })
+  const [editing, setEditing] = useState<Skill | null>(null)
+  const [editForm, setEditForm] = useState({ description: '', code: '', markdown: '' })
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
@@ -132,6 +156,40 @@ export default function SkillsPage() {
     toast({ title: 'Skill deleted' })
   }
 
+  const openEditor = (skill: Skill) => {
+    setEditing(skill)
+    setEditForm({
+      description: skill.description,
+      code: skill.code,
+      markdown: skill.markdown ?? '',
+    })
+    setEditorOpen(true)
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editing) return
+    setSaving(true)
+    try {
+      const updated = await updateSkill(editing.name, {
+        description: editForm.description,
+        code: editForm.code,
+        markdown: editing.markdown !== undefined ? editForm.markdown : undefined,
+      })
+      setSkills(prev => prev?.map(skill => skill.name === updated.name ? updated : skill) ?? [updated])
+      setEditing(updated)
+      setEditorOpen(false)
+      toast({ title: 'Skill saved' })
+    } catch (error) {
+      toast({
+        title: 'Could not save skill',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <>
       <div className="flex items-center justify-between mb-8">
@@ -171,7 +229,7 @@ export default function SkillsPage() {
       ) : (
         <div className="rounded-lg border border-border overflow-hidden">
           {skills.map(skill => (
-            <SkillRow key={skill.name} skill={skill} onDelete={handleDelete} />
+            <SkillRow key={skill.name} skill={skill} onEdit={openEditor} onDelete={handleDelete} />
           ))}
         </div>
       )}
@@ -230,6 +288,69 @@ export default function SkillsPage() {
             <Button variant="outline" size="sm" onClick={() => setModalOpen(false)}>Cancel</Button>
             <Button size="sm" onClick={handleCreate} disabled={saving}>
               {saving ? 'Registering...' : 'Register Skill'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Edit Skill</DialogTitle>
+          </DialogHeader>
+
+          {editing && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-mono text-sm text-foreground">{editing.name}</span>
+                <span className="rounded-md bg-secondary px-1.5 py-0.5 font-mono">
+                  {editing.source === 'hybrid' ? 'json + md' : editing.source === 'markdown' ? 'md' : 'json'}
+                </span>
+                {editing.markdown_path && <span className="font-mono">{editing.markdown_path}</span>}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-desc">Description</Label>
+                <Input
+                  id="edit-desc"
+                  value={editForm.description}
+                  onChange={e => setEditForm(f => ({ ...f, description: e.target.value }))}
+                  className="text-sm"
+                />
+              </div>
+
+              {editing.markdown !== undefined ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="edit-md">SKILL.md</Label>
+                  <Textarea
+                    id="edit-md"
+                    value={editForm.markdown}
+                    onChange={e => setEditForm(f => ({ ...f, markdown: e.target.value }))}
+                    rows={24}
+                    className="h-[520px] max-h-[520px] overflow-y-auto font-mono text-xs resize-none"
+                    spellCheck={false}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label htmlFor="edit-code">Implementation Notes / Spec</Label>
+                  <Textarea
+                    id="edit-code"
+                    value={editForm.code}
+                    onChange={e => setEditForm(f => ({ ...f, code: e.target.value }))}
+                    rows={18}
+                    className="h-[420px] max-h-[420px] overflow-y-auto font-mono text-xs resize-none"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setEditorOpen(false)}>Cancel</Button>
+            <Button size="sm" onClick={handleSaveEdit} disabled={saving}>
+              {saving ? 'Saving...' : 'Save Skill'}
             </Button>
           </DialogFooter>
         </DialogContent>

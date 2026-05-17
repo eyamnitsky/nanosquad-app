@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
-  ChevronLeft, ChevronDown, Save, Play, Square, Trash2, X, Plus
+  ChevronLeft, ChevronDown, Save, Play, Square, Trash2, X, Plus, Edit3
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,8 +16,8 @@ import { ModelPicker } from '@/components/model-picker'
 import { AgentCardSkeleton } from '@/components/skeletons'
 import {
   getAgent, putAgent, deleteAgent, getAgent as fetchAgent, streamRun, getLogs,
-  getRuns, getArtifacts,
-  type Agent, type LogEntry, type Run, type Artifact,
+  getRuns, getArtifacts, getSkills, updateSkill,
+  type Agent, type LogEntry, type Run, type Artifact, type Skill,
 } from '@/lib/api'
 import { RunStatusBadge } from '@/components/run-status-badge'
 import { ArtifactTypeBadge } from '@/components/artifact-type-badge'
@@ -29,6 +29,7 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 function StatusBadge({ status }: { status: Agent['status'] }) {
   return (
@@ -79,6 +80,53 @@ function SkillTagInput({ value, onChange }: { value: string[]; onChange: (v: str
   )
 }
 
+function AgentSkillList({
+  skillNames,
+  skills,
+  onEdit,
+}: {
+  skillNames: string[]
+  skills: Skill[]
+  onEdit: (skill: Skill) => void
+}) {
+  if (skillNames.length === 0) {
+    return <p className="text-xs text-muted-foreground">No skills assigned.</p>
+  }
+
+  return (
+    <div className="space-y-2">
+      {skillNames.map(name => {
+        const skill = skills.find(s => s.name === name)
+        return (
+          <div key={name} className="flex items-start justify-between gap-3 rounded-md border border-border bg-secondary/20 px-3 py-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs font-medium text-foreground">{name}</span>
+                {skill?.source && (
+                  <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                    {skill.source === 'hybrid' ? 'json + md' : skill.source === 'markdown' ? 'md' : 'json'}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                {skill?.description ?? 'Skill record not found.'}
+              </p>
+              {skill?.markdown_path && (
+                <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground/70">{skill.markdown_path}</p>
+              )}
+            </div>
+            {skill && (
+              <Button type="button" size="sm" variant="ghost" className="h-7 px-2" onClick={() => onEdit(skill)}>
+                <Edit3 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function AgentDetailPage() {
   const { name } = useParams<{ name: string }>()
   const router = useRouter()
@@ -89,6 +137,11 @@ export default function AgentDetailPage() {
   const [saving, setSaving] = useState(false)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
   const [fallbackPickerOpen, setFallbackPickerOpen] = useState(false)
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [skillEditorOpen, setSkillEditorOpen] = useState(false)
+  const [editingSkill, setEditingSkill] = useState<Skill | null>(null)
+  const [skillForm, setSkillForm] = useState({ description: '', code: '', markdown: '' })
+  const [savingSkill, setSavingSkill] = useState(false)
 
   // Run task state
   const [task, setTask] = useState('')
@@ -121,6 +174,9 @@ export default function AgentDetailPage() {
     getArtifacts({ agent: decodedName })
       .then(setAgentArtifacts)
       .catch(() => setAgentArtifacts([]))
+    getSkills()
+      .then(setSkills)
+      .catch(() => setSkills([]))
   }, [decodedName])
 
   useEffect(() => {
@@ -171,6 +227,39 @@ export default function AgentDetailPage() {
   const handleStop = () => {
     ctrlRef.current?.abort()
     setStreaming(false)
+  }
+
+  const openSkillEditor = (skill: Skill) => {
+    setEditingSkill(skill)
+    setSkillForm({
+      description: skill.description,
+      code: skill.code,
+      markdown: skill.markdown ?? '',
+    })
+    setSkillEditorOpen(true)
+  }
+
+  const handleSaveSkill = async () => {
+    if (!editingSkill) return
+    setSavingSkill(true)
+    try {
+      const updated = await updateSkill(editingSkill.name, {
+        description: skillForm.description,
+        code: skillForm.code,
+        markdown: editingSkill.markdown !== undefined ? skillForm.markdown : undefined,
+      })
+      setSkills(prev => prev.map(skill => skill.name === updated.name ? updated : skill))
+      setSkillEditorOpen(false)
+      toast({ title: 'Skill saved' })
+    } catch (error) {
+      toast({
+        title: 'Could not save skill',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    } finally {
+      setSavingSkill(false)
+    }
   }
 
   if (!agent) {
@@ -285,8 +374,8 @@ export default function AgentDetailPage() {
               <Textarea
                 value={form.system_prompt ?? ''}
                 onChange={e => set('system_prompt', e.target.value)}
-                rows={6}
-                className="font-mono text-xs resize-y"
+                rows={25}
+                className="max-h-[620px] overflow-y-auto font-mono text-xs resize-none"
                 placeholder="You are a helpful assistant..."
               />
             </div>
@@ -296,6 +385,11 @@ export default function AgentDetailPage() {
               <SkillTagInput
                 value={form.skills ?? []}
                 onChange={v => set('skills', v)}
+              />
+              <AgentSkillList
+                skillNames={form.skills ?? []}
+                skills={skills}
+                onEdit={openSkillEditor}
               />
             </div>
           </div>
@@ -517,6 +611,69 @@ export default function AgentDetailPage() {
         value={form.fallback_model}
         onSelect={id => set('fallback_model', id)}
       />
+
+      <Dialog open={skillEditorOpen} onOpenChange={setSkillEditorOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Edit Skill</DialogTitle>
+          </DialogHeader>
+
+          {editingSkill && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-mono text-sm text-foreground">{editingSkill.name}</span>
+                <span className="rounded-md bg-secondary px-1.5 py-0.5 font-mono">
+                  {editingSkill.source === 'hybrid' ? 'json + md' : editingSkill.source === 'markdown' ? 'md' : 'json'}
+                </span>
+                {editingSkill.markdown_path && <span className="font-mono">{editingSkill.markdown_path}</span>}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="agent-skill-desc">Description</Label>
+                <Input
+                  id="agent-skill-desc"
+                  value={skillForm.description}
+                  onChange={e => setSkillForm(f => ({ ...f, description: e.target.value }))}
+                  className="text-sm"
+                />
+              </div>
+
+              {editingSkill.markdown !== undefined ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="agent-skill-md">SKILL.md</Label>
+                  <Textarea
+                    id="agent-skill-md"
+                    value={skillForm.markdown}
+                    onChange={e => setSkillForm(f => ({ ...f, markdown: e.target.value }))}
+                    rows={24}
+                    className="h-[520px] max-h-[520px] overflow-y-auto font-mono text-xs resize-none"
+                    spellCheck={false}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label htmlFor="agent-skill-code">Implementation Notes / Spec</Label>
+                  <Textarea
+                    id="agent-skill-code"
+                    value={skillForm.code}
+                    onChange={e => setSkillForm(f => ({ ...f, code: e.target.value }))}
+                    rows={18}
+                    className="h-[420px] max-h-[420px] overflow-y-auto font-mono text-xs resize-none"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setSkillEditorOpen(false)}>Cancel</Button>
+            <Button size="sm" onClick={handleSaveSkill} disabled={savingSkill}>
+              {savingSkill ? 'Saving...' : 'Save Skill'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

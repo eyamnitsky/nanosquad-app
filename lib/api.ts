@@ -36,6 +36,9 @@ export interface Skill {
   description: string
   code: string
   agents: string[]
+  source?: 'app_json' | 'markdown' | 'hybrid'
+  markdown?: string
+  markdown_path?: string
 }
 
 export interface Model {
@@ -329,6 +332,8 @@ export interface AskResult {
 export const getSkills = () => request<Skill[]>('/skills')
 export const createSkill = (data: Pick<Skill, 'name' | 'description' | 'code'>) =>
   request<Skill>('/skills', { method: 'POST', body: JSON.stringify(data) })
+export const updateSkill = (name: string, data: Partial<Pick<Skill, 'description' | 'code' | 'markdown'>>) =>
+  request<Skill>(`/skills/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(data) })
 export const deleteSkill = (name: string) =>
   request<void>(`/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
 

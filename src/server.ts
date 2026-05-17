@@ -89,6 +89,9 @@ interface Skill {
   description: string
   code: string
   agents: string[]
+  source?: 'app_json' | 'markdown' | 'hybrid'
+  markdown?: string
+  markdown_path?: string
 }
 
 interface Squad {
@@ -785,19 +788,113 @@ async function deleteAgent(name: string): Promise<void> {
   }
 }
 
+function parseSkillMarkdown(markdown: string, fallbackName: string): Pick<Skill, 'name' | 'description'> {
+  const frontmatter = markdown.match(/^---\n([\s\S]*?)\n---/)
+  let name = fallbackName
+  let description = ''
+  if (frontmatter) {
+    const parsed = YAML.parse(frontmatter[1]) as Record<string, unknown>
+    if (typeof parsed.name === 'string' && parsed.name.trim()) name = parsed.name.trim()
+    if (typeof parsed.description === 'string') description = parsed.description.trim()
+  }
+  if (!description) {
+    const firstParagraph = markdown
+      .replace(/^---\n[\s\S]*?\n---/, '')
+      .split(/\n\s*\n/)
+      .map(part => part.replace(/^#+\s*/, '').trim())
+      .find(Boolean)
+    description = firstParagraph?.slice(0, 180) ?? ''
+  }
+  return { name: safeFileKey(name), description }
+}
+
+async function listMarkdownSkills(): Promise<Array<Skill & { source: 'markdown' }>> {
+  const roots = [
+    path.join(NEMOCLAW_HOME, 'openclaw-state', 'skills'),
+    path.join(NEMOCLAW_CONFIG_ROOT, 'openclaw-state', 'skills'),
+  ]
+  const uniqueRoots = [...new Set(roots)]
+  const skills: Array<Skill & { source: 'markdown' }> = []
+
+  for (const root of uniqueRoots) {
+    if (!(await pathExists(root))) continue
+    const entries = await fs.readdir(root, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const markdownPath = path.join(root, entry.name, 'SKILL.md')
+      if (!(await pathExists(markdownPath))) continue
+      const markdown = await readText(markdownPath, '')
+      const parsed = parseSkillMarkdown(markdown, entry.name)
+      skills.push({
+        name: parsed.name,
+        description: parsed.description,
+        code: markdown,
+        agents: [],
+        source: 'markdown',
+        markdown,
+        markdown_path: markdownPath,
+      })
+    }
+  }
+
+  return skills
+}
+
+async function syncSkillMarkdownToSandboxBestEffort(skillName: string, markdownPath: string): Promise<void> {
+  try {
+    const onboard = await readJsonFile<{ sandboxName?: string }>(ONBOARD_SESSION_PATH, {})
+    const sandboxName = onboard.sandboxName
+    if (!sandboxName) return
+    await runOpenShellWithCandidates([
+      'sandbox',
+      'upload',
+      sandboxName,
+      markdownPath,
+      `/sandbox/.openclaw-data/skills/${safeFileKey(skillName)}/`,
+    ])
+  } catch (error) {
+    console.warn('Skill markdown sandbox sync failed:', error instanceof Error ? error.message : String(error))
+  }
+}
+
 async function listSkills(): Promise<Skill[]> {
   const files = (await fs.readdir(PATHS.skills)).filter(name => name.endsWith('.json'))
   const rawSkills = await Promise.all(files.map(file => readJsonFile<Partial<Skill>>(path.join(PATHS.skills, file), {})))
   const agents = await listAgents()
-  return rawSkills
+  const jsonSkills = rawSkills
     .filter((skill): skill is Partial<Skill> & { name: string } => typeof skill.name === 'string')
     .map(skill => ({
       name: skill.name,
       description: skill.description ?? '',
       code: skill.code ?? '',
       agents: agents.filter(agent => agent.skills.includes(skill.name)).map(agent => agent.name),
+      source: 'app_json' as const,
     }))
-    .sort((a, b) => a.name.localeCompare(b.name))
+  const markdownSkills = await listMarkdownSkills()
+  const merged = new Map<string, Skill>()
+
+  for (const skill of jsonSkills) {
+    merged.set(skill.name, skill)
+  }
+  for (const skill of markdownSkills) {
+    const current = merged.get(skill.name)
+    if (current) {
+      merged.set(skill.name, {
+        ...current,
+        description: current.description || skill.description,
+        source: 'hybrid',
+        markdown: skill.markdown,
+        markdown_path: skill.markdown_path,
+      })
+    } else {
+      merged.set(skill.name, {
+        ...skill,
+        agents: agents.filter(agent => agent.skills.includes(skill.name)).map(agent => agent.name),
+      })
+    }
+  }
+
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
 async function putSkill(payload: Pick<Skill, 'name' | 'description' | 'code'>): Promise<Skill> {
@@ -826,6 +923,33 @@ async function deleteSkill(name: string): Promise<void> {
       .filter(agent => agent.skills.includes(name))
       .map(agent => putAgent(agent.name, { skills: agent.skills.filter(skill => skill !== name) }))
   )
+}
+
+async function updateSkill(name: string, payload: Partial<Pick<Skill, 'description' | 'code' | 'markdown'>>): Promise<Skill> {
+  const safeName = safeFileKey(name)
+  const jsonPath = path.join(PATHS.skills, `${safeName}.json`)
+  if (await pathExists(jsonPath)) {
+    const current = await readJsonFile<Partial<Skill>>(jsonPath, {})
+    await writeJsonFile(jsonPath, {
+      name: safeName,
+      description: payload.description ?? current.description ?? '',
+      code: payload.code ?? current.code ?? '',
+    })
+  }
+
+  if (typeof payload.markdown === 'string') {
+    const markdownSkill = (await listMarkdownSkills()).find(skill => skill.name === safeName)
+    if (!markdownSkill?.markdown_path) {
+      throw new Error(`No SKILL.md found for ${safeName}`)
+    }
+    await writeText(markdownSkill.markdown_path, payload.markdown)
+    await syncSkillMarkdownToSandboxBestEffort(safeName, markdownSkill.markdown_path)
+  }
+
+  const skills = await listSkills()
+  const updated = skills.find(skill => skill.name === safeName)
+  if (!updated) throw new Error('Failed to update skill')
+  return updated
 }
 
 async function listSquads(): Promise<Squad[]> {
@@ -2732,6 +2856,20 @@ function chooseSkillForTask(task: string, availableSkills: string[]): string | u
   if (normalizedSkills.has('summarize') && /\b(summary|summarize|digest|brief|tl;dr)\b/.test(lowerTask)) {
     return availableSkills.find(skill => skill.trim().toLowerCase() === 'summarize')
   }
+  if (
+    normalizedSkills.has('create_draft') &&
+    /\b(draft|drafts|gmail|email|emails|outreach)\b/.test(lowerTask) &&
+    /\b(create|prepare|write|customize|personalize|personalise|reach out|feedback)\b/.test(lowerTask)
+  ) {
+    return availableSkills.find(skill => skill.trim().toLowerCase() === 'create_draft')
+  }
+  if (
+    normalizedSkills.has('send_email') &&
+    /\b(send|sent|email|emails)\b/.test(lowerTask) &&
+    /\b(approved|approval|send now|go ahead|explicitly approve)\b/.test(lowerTask)
+  ) {
+    return availableSkills.find(skill => skill.trim().toLowerCase() === 'send_email')
+  }
 
   for (const skill of availableSkills) {
     const normalizedSkill = skill.trim().toLowerCase()
@@ -2965,6 +3103,16 @@ async function maybeExecuteNemoclawSkill(params: {
   if (normalizedSkill === 'project_ops') {
     return executeProjectOpsSkill(params.task, params.preferredSquadId)
   }
+  if (normalizedSkill === 'create_draft') {
+    return executeCreateDraftSkill(params.task)
+  }
+  if (normalizedSkill === 'send_email') {
+    return {
+      ok: false,
+      output: '',
+      message: 'send_email is registered but is not auto-executed by NanoSquad. Create Gmail drafts first, or send only after explicit user approval through an approved mailer.',
+    }
+  }
 
   const cliPath = process.env.NEMOCLAW_CLI_PATH
   if (!cliPath) {
@@ -3182,6 +3330,158 @@ async function callModel(params: {
     output: `Model call unavailable. Generated fallback response for task:\n\n${params.task}${projectContext}`,
     model_used: params.model,
     used_fallback: true,
+  }
+}
+
+interface GmailDraftRequest {
+  to: string
+  subject: string
+  body: string
+  cc?: string
+  bcc?: string
+  html?: string
+}
+
+function normalizeDraftBody(raw: string): string {
+  const text = raw.replace(/\r\n?/g, '\n').trim()
+  if (!text) return text
+
+  const paragraphs = text.split(/\n{2,}/).map(chunk => chunk.trim()).filter(Boolean)
+  const normalized = paragraphs.map(paragraph => {
+    const lines = paragraph
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+
+    if (lines.length <= 1) return lines[0] ?? ''
+
+    const isListParagraph = lines.every(line => /^([-*]\s+|\d+\.\s+)/.test(line))
+    if (isListParagraph) return lines.join('\n')
+
+    const looksLikeShortSignoff =
+      lines.length === 2 &&
+      /^[A-Za-z ,.'-]{1,40}$/.test(lines[0]) &&
+      /^[A-Za-z .'-]{1,40}$/.test(lines[1])
+    if (looksLikeShortSignoff) return lines.join('\n')
+
+    return lines.join(' ')
+  })
+
+  return normalized.join('\n\n')
+}
+
+function extractJsonObject(text: string): unknown {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const source = fenced?.[1] ?? text
+  const start = source.indexOf('{')
+  const end = source.lastIndexOf('}')
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('No JSON object found in model output.')
+  }
+  return JSON.parse(source.slice(start, end + 1))
+}
+
+function normalizeDraftRequests(value: unknown): GmailDraftRequest[] {
+  const drafts = typeof value === 'object' && value !== null && Array.isArray((value as { drafts?: unknown }).drafts)
+    ? (value as { drafts: unknown[] }).drafts
+    : []
+
+  return drafts
+    .map((draft): GmailDraftRequest | null => {
+      if (typeof draft !== 'object' || draft === null) return null
+      const candidate = draft as Record<string, unknown>
+      const to = typeof candidate.to === 'string' ? candidate.to.trim() : ''
+      const subject = typeof candidate.subject === 'string' ? candidate.subject.trim() : ''
+      const body = typeof candidate.body === 'string' ? normalizeDraftBody(candidate.body) : ''
+      if (!to || !subject || !body || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return null
+      return {
+        to,
+        subject,
+        body,
+        cc: typeof candidate.cc === 'string' ? candidate.cc.trim() : undefined,
+        bcc: typeof candidate.bcc === 'string' ? candidate.bcc.trim() : undefined,
+        html: typeof candidate.html === 'string' ? candidate.html.trim() : undefined,
+      }
+    })
+    .filter((draft): draft is GmailDraftRequest => Boolean(draft))
+}
+
+async function executeCreateDraftSkill(task: string): Promise<{ ok: boolean; output: string; message: string }> {
+  const settings = await readSettings()
+  const modelResult = await callModel({
+    model: settings.default_model,
+    systemPrompt: [
+      'You create short, plain-text Liazon outreach email drafts.',
+      'Return only JSON with this shape: {"drafts":[{"to":"email","subject":"subject","body":"body"}]}.',
+      'Use only recipients explicitly present in the task. Do not invent email addresses.',
+      'Customize each email based on the person role/context in the task.',
+      'Ask the recipient to check out Liazon at https://www.liazon.ai/ and share candid feedback.',
+      'Make clear that the primary purpose is feedback, not selling, and avoid sounding like a sales pitch.',
+      'Use normal flowing paragraphs. Do not hard-wrap lines inside a paragraph; only use blank lines between paragraphs.',
+      'Do not include follow-up sequences, explanations, markdown, or extra keys unless cc, bcc, or html are explicitly needed.',
+    ].join('\n'),
+    task,
+  })
+
+  if (modelResult.used_fallback) {
+    return {
+      ok: false,
+      output: modelResult.output,
+      message: 'Could not generate draft payload because the model call was unavailable.',
+    }
+  }
+
+  let drafts: GmailDraftRequest[]
+  try {
+    drafts = normalizeDraftRequests(extractJsonObject(modelResult.output))
+  } catch (error) {
+    return {
+      ok: false,
+      output: modelResult.output,
+      message: `Could not parse generated draft JSON: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+
+  if (drafts.length === 0) {
+    return {
+      ok: false,
+      output: modelResult.output,
+      message: 'No valid draft recipients were found. Provide at least one recipient email address.',
+    }
+  }
+
+  const scriptPath = path.join(NEMOCLAW_HOME, 'openclaw-state', 'skills', 'create_draft', 'scripts', 'create_draft_host.py')
+  if (!(await pathExists(scriptPath))) {
+    return {
+      ok: false,
+      output: '',
+      message: `Gmail draft helper not found at ${scriptPath}`,
+    }
+  }
+
+  const results: string[] = []
+  for (const draft of drafts) {
+    const args = [scriptPath, '--to', draft.to, '--subject', draft.subject, '--body', draft.body]
+    if (draft.cc) args.push('--cc', draft.cc)
+    if (draft.bcc) args.push('--bcc', draft.bcc)
+    if (draft.html) args.push('--html', draft.html)
+
+    try {
+      const { stdout, stderr } = await execFileAsync('python3', args, { timeout: 60_000, maxBuffer: 1024 * 1024 })
+      results.push(`Created draft for ${draft.to}: ${draft.subject}\n${stdout || stderr || ''}`.trim())
+    } catch (error) {
+      return {
+        ok: false,
+        output: results.join('\n\n'),
+        message: `Failed while creating draft for ${draft.to}: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    output: results.join('\n\n'),
+    message: `Created ${drafts.length} Gmail draft${drafts.length === 1 ? '' : 's'} for review.`,
   }
 }
 
@@ -3891,6 +4191,15 @@ async function bootstrap(): Promise<void> {
       res.json(skill)
     } catch (error) {
       res.status(400).send(error instanceof Error ? error.message : 'Failed to create skill')
+    }
+  })
+
+  app.put('/skills/:name', async (req, res) => {
+    try {
+      const skill = await updateSkill(req.params.name, req.body as Partial<Pick<Skill, 'description' | 'code' | 'markdown'>>)
+      res.json(skill)
+    } catch (error) {
+      res.status(400).send(error instanceof Error ? error.message : 'Failed to update skill')
     }
   })
 

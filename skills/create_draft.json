@@ -1,0 +1,5 @@
+{
+  "name": "create_draft",
+  "description": "Create customized Gmail drafts for user review. Use for Liazon outreach when Sam is given recipients and role/context; drafts must appear in Gmail Drafts and must not be sent automatically.",
+  "code": "Use the Gmail draft helper at /Users/openclaw/.nemoclaw/openclaw-state/skills/create_draft/scripts/create_draft_host.py. For each recipient, customize the subject and plain-text body based on the person's role and context, then create one Gmail draft via IMAP APPEND. Include https://www.liazon.ai/ when asking the recipient to check out Liazon. Make clear that the primary ask is candid feedback, not a sales pitch. Required fields per draft: to, subject, body. Optional fields: cc, bcc, html. Credentials are read from /Users/openclaw/.nemoclaw/openclaw-state/secrets/gmail.json. Never send email from this skill."
+}
